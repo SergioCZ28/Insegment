@@ -1,0 +1,1012 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>BacDETR Annotation Tool</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: 'Segoe UI', sans-serif; background: #1a1a2e; color: #e0e0e0; display: flex; height: 100vh; overflow: hidden; }
+
+/* Sidebar */
+#sidebar { width: 280px; background: #16213e; padding: 16px; display: flex; flex-direction: column; gap: 12px; border-right: 1px solid #333; overflow-y: auto; }
+#sidebar h2 { font-size: 16px; color: #4fc3f7; margin-bottom: 4px; }
+#sidebar label { font-size: 12px; color: #999; }
+#sidebar select, #sidebar input, #sidebar button { width: 100%; padding: 8px; border: 1px solid #444; border-radius: 4px; background: #0f3460; color: #e0e0e0; font-size: 13px; }
+#sidebar button { cursor: pointer; background: #1a8fdd; border: none; font-weight: bold; }
+#sidebar button:hover { background: #2196f3; }
+#sidebar button.danger { background: #c0392b; }
+#sidebar button.danger:hover { background: #e74c3c; }
+
+.stat-row { display: flex; justify-content: space-between; font-size: 13px; padding: 2px 0; }
+.stat-label { color: #999; }
+.stat-value { font-weight: bold; }
+.stat-sc { color: #4caf50; }
+.stat-clump { color: #f44336; }
+.stat-debris { color: #ffeb3b; }
+
+.class-btn { display: inline-block; width: 30%; padding: 6px; text-align: center; border-radius: 4px; cursor: pointer; font-size: 12px; font-weight: bold; border: 2px solid transparent; }
+.class-btn.active { border-color: white; }
+.class-btn-sc { background: #2e7d32; }
+.class-btn-clump { background: #c62828; }
+.class-btn-debris { background: #f9a825; color: #333; }
+
+.opacity-slider { width: 100%; }
+#status { font-size: 11px; color: #777; margin-top: auto; padding-top: 8px; border-top: 1px solid #333; }
+.help-text { font-size: 11px; color: #666; line-height: 1.4; }
+
+/* Canvas area */
+#canvas-container { flex: 1; position: relative; overflow: hidden; background: #111; cursor: crosshair; }
+canvas { position: absolute; top: 0; left: 0; image-rendering: pixelated; }
+#loading { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: 18px; color: #4fc3f7; display: none; }
+
+/* Toolbar */
+#toolbar { position: absolute; top: 10px; left: 10px; z-index: 10; display: flex; gap: 6px; }
+#toolbar button { padding: 6px 12px; background: rgba(26,143,221,0.8); border: none; color: white; border-radius: 4px; cursor: pointer; font-size: 12px; }
+#toolbar button:hover { background: rgba(33,150,243,0.9); }
+#toolbar button.active-tool { background: rgba(255,152,0,0.9); }
+
+/* Mode indicator */
+#mode-indicator { position: absolute; top: 10px; right: 120px; z-index: 10; padding: 4px 10px; border-radius: 4px; font-size: 12px; font-weight: bold; display: none; }
+#mode-indicator.polygon-mode { display: block; background: rgba(255,152,0,0.9); color: white; }
+
+/* Cursor coordinates */
+#coords { position: absolute; bottom: 10px; right: 10px; background: rgba(0,0,0,0.7); padding: 4px 10px; border-radius: 4px; font-size: 12px; font-family: monospace; z-index: 10; }
+</style>
+</head>
+<body>
+
+<div id="sidebar">
+    <h2>BacDETR Annotation Tool</h2>
+
+    <div>
+        <label>Well</label>
+        <select id="well-select"><option value="">Loading...</option></select>
+    </div>
+    <div>
+        <label>Timepoint</label>
+        <select id="tp-select"><option value="0">0</option></select>
+    </div>
+    <button id="load-btn">Load Frame + Run Inference</button>
+
+    <hr style="border-color: #333;">
+    <label>Load from folder (PNGs + COCO JSON)</label>
+    <input type="text" id="folder-input" placeholder="Paste folder path here..." style="font-size: 11px;">
+    <button id="scan-folder-btn" style="background: #e65100;">Scan Folder</button>
+    <select id="semi-select" style="display:none;"><option value="">-- Select frame --</option></select>
+    <div style="display: flex; gap: 4px;">
+        <button id="load-semi-btn" style="background: #e65100; display:none; flex:1;">Load Annotations</button>
+        <button id="infer-semi-btn" style="background: #1a8fdd; display:none; flex:1;">Run Inference</button>
+    </div>
+
+    <hr style="border-color: #333;">
+
+    <div>
+        <label>Active Class (for adding)</label>
+        <div style="display: flex; gap: 4px; margin-top: 4px;">
+            <div class="class-btn class-btn-sc active" data-class="0" id="class-btn-0">1: SC</div>
+            <div class="class-btn class-btn-clump" data-class="1" id="class-btn-1">2: Clump</div>
+            <div class="class-btn class-btn-debris" data-class="2" id="class-btn-2">3: Debris</div>
+        </div>
+    </div>
+
+    <div>
+        <label>Overlay Opacity</label>
+        <input type="range" id="opacity-slider" class="opacity-slider" min="0" max="100" value="40">
+    </div>
+
+    <hr style="border-color: #333;">
+
+    <div id="stats-panel">
+        <label>Detection Stats</label>
+        <div class="stat-row"><span class="stat-label">Total:</span><span class="stat-value" id="stat-total">-</span></div>
+        <div class="stat-row"><span class="stat-label">Single-cell:</span><span class="stat-value stat-sc" id="stat-sc">-</span></div>
+        <div class="stat-row"><span class="stat-label">Clump:</span><span class="stat-value stat-clump" id="stat-clump">-</span></div>
+        <div class="stat-row"><span class="stat-label">Debris:</span><span class="stat-value stat-debris" id="stat-debris">-</span></div>
+        <div class="stat-row"><span class="stat-label">Model:</span><span class="stat-value" id="stat-model">-</span></div>
+        <div class="stat-row"><span class="stat-label">Manual:</span><span class="stat-value" id="stat-manual">-</span></div>
+    </div>
+
+    <button id="save-btn" style="background: #2e7d32;">Save (Ctrl+S)</button>
+    <button id="export-btn">Export COCO JSON</button>
+    <button id="undo-btn" class="danger">Undo Last Action</button>
+
+    <hr style="border-color: #333;">
+
+    <div class="help-text">
+        <strong>Controls:</strong><br>
+        Left-click: Add cell at cursor<br>
+        Right-click: Remove nearest detection<br>
+        Click detection + 1/2/3: Reclassify<br>
+        P: Toggle polygon draw mode<br>
+        G: Toggle 3x3 grid overlay<br>
+        Scroll: Zoom in/out<br>
+        Space+drag or Shift+drag: Pan<br>
+        Ctrl+S: Save<br>
+        F: Fit to screen<br>
+        Esc: Deselect / cancel polygon
+    </div>
+
+    <div id="status">Ready</div>
+</div>
+
+<div id="canvas-container">
+    <canvas id="bg-canvas"></canvas>
+    <canvas id="overlay-canvas"></canvas>
+    <div id="loading">Running inference...</div>
+    <div id="mode-indicator">POLYGON MODE (click to add points, double-click to close)</div>
+    <div id="coords">x: 0, y: 0</div>
+</div>
+
+<script>
+// ============================================================================
+// State
+// ============================================================================
+const state = {
+    well: null,
+    timepoint: 0,
+    annotations: [],
+    selectedId: null,
+    activeClass: 0,
+    opacity: 0.4,
+    // View transform
+    zoom: 1,
+    panX: 0,
+    panY: 0,
+    imgWidth: 0,
+    imgHeight: 0,
+    // Interaction
+    isPanning: false,
+    panStartX: 0,
+    panStartY: 0,
+    spaceHeld: false,
+    // Undo
+    undoStack: [],
+    // Image
+    bgImage: null,
+    // Grid overlay
+    showGrid: false,
+    // Polygon drawing mode
+    polygonMode: false,
+    polygonPoints: [],  // [{x, y}, ...]
+};
+
+const CLASS_COLORS = {
+    0: 'rgba(76, 175, 80, ALPHA)',   // green - single-cell
+    1: 'rgba(244, 67, 54, ALPHA)',   // red - clump
+    2: 'rgba(255, 235, 59, ALPHA)',  // yellow - debris
+};
+const CLASS_STROKE = {
+    0: '#4caf50',
+    1: '#f44336',
+    2: '#ffeb3b',
+};
+
+// Canvas refs
+const container = document.getElementById('canvas-container');
+const bgCanvas = document.getElementById('bg-canvas');
+const overlayCanvas = document.getElementById('overlay-canvas');
+const bgCtx = bgCanvas.getContext('2d');
+const overlayCtx = overlayCanvas.getContext('2d');
+
+// ============================================================================
+// API calls
+// ============================================================================
+async function loadFrames() {
+    const resp = await fetch('/api/frames');
+    const data = await resp.json();
+    const sel = document.getElementById('well-select');
+    sel.innerHTML = '';
+    for (const [well, info] of Object.entries(data)) {
+        const opt = document.createElement('option');
+        opt.value = well;
+        opt.textContent = `${well} (${info.n_timepoints} tp)`;
+        sel.appendChild(opt);
+    }
+    if (sel.options.length > 0) {
+        updateTimepointSelector(Object.values(data)[0].n_timepoints);
+    }
+    sel.addEventListener('change', () => {
+        const w = sel.value;
+        if (data[w]) updateTimepointSelector(data[w].n_timepoints);
+    });
+}
+
+function updateTimepointSelector(n) {
+    const sel = document.getElementById('tp-select');
+    sel.innerHTML = '';
+    for (let i = 0; i < n; i++) {
+        const opt = document.createElement('option');
+        opt.value = i;
+        opt.textContent = `t${i}`;
+        sel.appendChild(opt);
+    }
+}
+
+async function loadFrame() {
+    const well = document.getElementById('well-select').value;
+    const tp = parseInt(document.getElementById('tp-select').value);
+    if (!well) return;
+
+    state.well = well;
+    state.timepoint = tp;
+    setStatus('Loading frame...');
+    document.getElementById('loading').style.display = 'block';
+
+    // Load BF image
+    const img = new Image();
+    img.onload = async () => {
+        state.bgImage = img;
+        state.imgWidth = img.width;
+        state.imgHeight = img.height;
+        resizeCanvases();
+        fitToScreen();
+        drawBg();
+
+        // Run inference
+        setStatus('Running inference...');
+        try {
+            const resp = await fetch(`/api/detections/${well}/${tp}`);
+            const data = await resp.json();
+            state.annotations = data.annotations || [];
+            state.undoStack = [];
+            drawOverlay();
+            updateStats();
+            setStatus(`Loaded: ${state.annotations.length} detections in ${data.inference_time}s`);
+        } catch (e) {
+            setStatus(`Error: ${e.message}`);
+        }
+        document.getElementById('loading').style.display = 'none';
+    };
+    img.src = `/api/frame/${well}/${tp}?t=${Date.now()}`;
+}
+
+async function addAnnotation(x, y) {
+    const resp = await fetch('/api/add', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+            well: state.well,
+            timepoint: state.timepoint,
+            x: x,
+            y: y,
+            class_id: state.activeClass
+        })
+    });
+    const data = await resp.json();
+    if (data.status === 'ok') {
+        state.undoStack.push({action: 'add', annotation: data.annotation});
+        state.annotations.push(data.annotation);
+        drawOverlay();
+        updateStats();
+    }
+}
+
+async function removeAnnotation(annId) {
+    const ann = state.annotations.find(a => a.id === annId);
+    const resp = await fetch(`/api/remove/${state.well}/${state.timepoint}/${annId}`, {
+        method: 'POST'
+    });
+    const data = await resp.json();
+    if (data.status === 'ok') {
+        state.undoStack.push({action: 'remove', annotation: ann});
+        state.annotations = state.annotations.filter(a => a.id !== annId);
+        drawOverlay();
+        updateStats();
+    }
+}
+
+async function reclassifyAnnotation(annId, newClass) {
+    const ann = state.annotations.find(a => a.id === annId);
+    const oldClass = ann.category_id;
+    const resp = await fetch(`/api/reclassify/${state.well}/${state.timepoint}/${annId}`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({class_id: newClass})
+    });
+    const data = await resp.json();
+    if (data.status === 'ok') {
+        state.undoStack.push({action: 'reclassify', annId, oldClass, newClass});
+        ann.category_id = newClass;
+        drawOverlay();
+        updateStats();
+    }
+}
+
+async function exportAnnotations() {
+    if (!state.well) return;
+    const saveBtn = document.getElementById('save-btn');
+    const exportBtn = document.getElementById('export-btn');
+    saveBtn.textContent = 'Saving...';
+    exportBtn.textContent = 'Saving...';
+    try {
+        const resp = await fetch(`/api/export/${state.well}/${state.timepoint}`);
+        const data = await resp.json();
+        if (data.status === 'ok') {
+            setStatus(`Saved ${data.n_annotations} annotations to ${data.path}`);
+            saveBtn.textContent = 'Saved!';
+            saveBtn.style.background = '#1b5e20';
+            exportBtn.textContent = 'Saved!';
+            exportBtn.style.background = '#1b5e20';
+            setTimeout(() => {
+                saveBtn.textContent = 'Save (Ctrl+S)';
+                saveBtn.style.background = '#2e7d32';
+                exportBtn.textContent = 'Export COCO JSON';
+                exportBtn.style.background = '#1a8fdd';
+            }, 2000);
+        } else {
+            setStatus(`Error: ${data.error || 'Unknown error'}`);
+            saveBtn.textContent = 'Error!';
+            exportBtn.textContent = 'Error!';
+        }
+    } catch (e) {
+        setStatus(`Error: ${e.message}`);
+        saveBtn.textContent = 'Save (Ctrl+S)';
+        exportBtn.textContent = 'Export COCO JSON';
+    }
+}
+
+// ============================================================================
+// Drawing
+// ============================================================================
+function resizeCanvases() {
+    const w = container.clientWidth;
+    const h = container.clientHeight;
+    bgCanvas.width = w;
+    bgCanvas.height = h;
+    overlayCanvas.width = w;
+    overlayCanvas.height = h;
+}
+
+function fitToScreen() {
+    const cw = container.clientWidth;
+    const ch = container.clientHeight;
+    const scaleX = cw / state.imgWidth;
+    const scaleY = ch / state.imgHeight;
+    state.zoom = Math.min(scaleX, scaleY) * 0.95;
+    state.panX = (cw - state.imgWidth * state.zoom) / 2;
+    state.panY = (ch - state.imgHeight * state.zoom) / 2;
+}
+
+function drawBg() {
+    if (!state.bgImage) return;
+    bgCtx.clearRect(0, 0, bgCanvas.width, bgCanvas.height);
+    bgCtx.save();
+    bgCtx.translate(state.panX, state.panY);
+    bgCtx.scale(state.zoom, state.zoom);
+    bgCtx.imageSmoothingEnabled = state.zoom < 2;
+    bgCtx.drawImage(state.bgImage, 0, 0);
+    bgCtx.restore();
+}
+
+function drawOverlay() {
+    overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+    overlayCtx.save();
+    overlayCtx.translate(state.panX, state.panY);
+    overlayCtx.scale(state.zoom, state.zoom);
+
+    for (const ann of state.annotations) {
+        const seg = ann.segmentation;
+        if (!seg || !seg[0] || seg[0].length < 6) continue;
+
+        const poly = seg[0];
+        const classId = ann.category_id;
+        const isSelected = ann.id === state.selectedId;
+
+        // Fill
+        overlayCtx.beginPath();
+        overlayCtx.moveTo(poly[0], poly[1]);
+        for (let i = 2; i < poly.length; i += 2) {
+            overlayCtx.lineTo(poly[i], poly[i + 1]);
+        }
+        overlayCtx.closePath();
+
+        const fillColor = CLASS_COLORS[classId].replace('ALPHA', state.opacity.toString());
+        overlayCtx.fillStyle = fillColor;
+        overlayCtx.fill();
+
+        // Stroke
+        overlayCtx.strokeStyle = isSelected ? '#ffffff' : CLASS_STROKE[classId];
+        overlayCtx.lineWidth = isSelected ? 2 / state.zoom : 1 / state.zoom;
+        overlayCtx.stroke();
+
+        // Manual marker
+        if (ann.source === 'manual') {
+            const cx = poly.reduce((s, v, i) => i % 2 === 0 ? s + v : s, 0) / (poly.length / 2);
+            const cy = poly.reduce((s, v, i) => i % 2 === 1 ? s + v : s, 0) / (poly.length / 2);
+            overlayCtx.beginPath();
+            overlayCtx.arc(cx, cy, 2 / state.zoom, 0, Math.PI * 2);
+            overlayCtx.fillStyle = '#ffffff';
+            overlayCtx.fill();
+        }
+    }
+
+    // Draw 3x3 grid overlay (in image coordinates so it moves with pan/zoom)
+    if (state.showGrid && state.imgWidth > 0) {
+        overlayCtx.strokeStyle = 'rgba(255, 255, 255, 0.12)';
+        overlayCtx.lineWidth = 1 / state.zoom;
+        overlayCtx.setLineDash([]);
+
+        // Vertical lines (divide into 3 columns)
+        for (let i = 1; i < 3; i++) {
+            const x = (state.imgWidth / 3) * i;
+            overlayCtx.beginPath();
+            overlayCtx.moveTo(x, 0);
+            overlayCtx.lineTo(x, state.imgHeight);
+            overlayCtx.stroke();
+        }
+        // Horizontal lines (divide into 3 rows)
+        for (let i = 1; i < 3; i++) {
+            const y = (state.imgHeight / 3) * i;
+            overlayCtx.beginPath();
+            overlayCtx.moveTo(0, y);
+            overlayCtx.lineTo(state.imgWidth, y);
+            overlayCtx.stroke();
+        }
+
+        // Quadrant labels (very subtle)
+        overlayCtx.font = `${Math.max(14, 24 / state.zoom)}px sans-serif`;
+        overlayCtx.fillStyle = 'rgba(255, 255, 255, 0.10)';
+        const labels = ['A1', 'A2', 'A3', 'B1', 'B2', 'B3', 'C1', 'C2', 'C3'];
+        for (let r = 0; r < 3; r++) {
+            for (let c = 0; c < 3; c++) {
+                const lx = (state.imgWidth / 3) * c + 8;
+                const ly = (state.imgHeight / 3) * r + 24 / state.zoom + 8;
+                overlayCtx.fillText(labels[r * 3 + c], lx, ly);
+            }
+        }
+    }
+
+    // Draw polygon-in-progress
+    if (state.polygonMode && state.polygonPoints.length > 0) {
+        const pts = state.polygonPoints;
+        overlayCtx.beginPath();
+        overlayCtx.moveTo(pts[0].x, pts[0].y);
+        for (let i = 1; i < pts.length; i++) {
+            overlayCtx.lineTo(pts[i].x, pts[i].y);
+        }
+        overlayCtx.strokeStyle = '#ff9800';
+        overlayCtx.lineWidth = 2 / state.zoom;
+        overlayCtx.setLineDash([5 / state.zoom, 5 / state.zoom]);
+        overlayCtx.stroke();
+        overlayCtx.setLineDash([]);
+
+        // Draw vertices
+        for (const pt of pts) {
+            overlayCtx.beginPath();
+            overlayCtx.arc(pt.x, pt.y, 3 / state.zoom, 0, Math.PI * 2);
+            overlayCtx.fillStyle = '#ff9800';
+            overlayCtx.fill();
+        }
+    }
+
+    overlayCtx.restore();
+}
+
+function updateStats() {
+    const anns = state.annotations;
+    document.getElementById('stat-total').textContent = anns.length;
+    document.getElementById('stat-sc').textContent = anns.filter(a => a.category_id === 0).length;
+    document.getElementById('stat-clump').textContent = anns.filter(a => a.category_id === 1).length;
+    document.getElementById('stat-debris').textContent = anns.filter(a => a.category_id === 2).length;
+    document.getElementById('stat-model').textContent = anns.filter(a => a.source === 'model').length;
+    document.getElementById('stat-manual').textContent = anns.filter(a => a.source === 'manual').length;
+}
+
+function setStatus(msg) {
+    document.getElementById('status').textContent = msg;
+}
+
+// ============================================================================
+// Coordinate transforms
+// ============================================================================
+function screenToImage(sx, sy) {
+    const rect = container.getBoundingClientRect();
+    const cx = sx - rect.left;
+    const cy = sy - rect.top;
+    const ix = (cx - state.panX) / state.zoom;
+    const iy = (cy - state.panY) / state.zoom;
+    return [ix, iy];
+}
+
+function pointInPolygon(px, py, poly) {
+    // Ray-casting algorithm for point-in-polygon
+    let inside = false;
+    const n = poly.length / 2;
+    for (let i = 0, j = n - 1; i < n; j = i++) {
+        const xi = poly[i * 2], yi = poly[i * 2 + 1];
+        const xj = poly[j * 2], yj = poly[j * 2 + 1];
+        if (((yi > py) !== (yj > py)) && (px < (xj - xi) * (py - yi) / (yj - yi) + xi)) {
+            inside = !inside;
+        }
+    }
+    return inside;
+}
+
+function findAnnotationAtPoint(ix, iy) {
+    // Check if point is INSIDE any annotation polygon (smallest area first for overlapping)
+    let candidates = [];
+    for (const ann of state.annotations) {
+        const seg = ann.segmentation;
+        if (!seg || !seg[0] || seg[0].length < 6) continue;
+        if (pointInPolygon(ix, iy, seg[0])) {
+            candidates.push(ann);
+        }
+    }
+    if (candidates.length === 0) return null;
+    // Return smallest (most specific) if overlapping
+    candidates.sort((a, b) => (a.area || 999999) - (b.area || 999999));
+    return candidates[0];
+}
+
+function findNearestAnnotation(ix, iy, maxDist = 15) {
+    // First check if inside any polygon
+    const inside = findAnnotationAtPoint(ix, iy);
+    if (inside) return inside;
+
+    // Fallback: nearest centroid (for right-click remove)
+    let best = null;
+    let bestDist = maxDist;
+
+    for (const ann of state.annotations) {
+        const seg = ann.segmentation;
+        if (!seg || !seg[0]) continue;
+
+        const poly = seg[0];
+        let cx = 0, cy = 0;
+        const n = poly.length / 2;
+        for (let i = 0; i < poly.length; i += 2) {
+            cx += poly[i];
+            cy += poly[i + 1];
+        }
+        cx /= n;
+        cy /= n;
+
+        const dist = Math.sqrt((ix - cx) ** 2 + (iy - cy) ** 2);
+        if (dist < bestDist) {
+            bestDist = dist;
+            best = ann;
+        }
+    }
+    return best;
+}
+
+// ============================================================================
+// Event handlers
+// ============================================================================
+overlayCanvas.addEventListener('mousedown', (e) => {
+    if (e.shiftKey || e.button === 1 || state.spaceHeld) {
+        // Pan (shift+drag, middle-click, or spacebar+drag)
+        state.isPanning = true;
+        state.panStartX = e.clientX - state.panX;
+        state.panStartY = e.clientY - state.panY;
+        overlayCanvas.style.cursor = 'grabbing';
+        e.preventDefault();
+        return;
+    }
+
+    const [ix, iy] = screenToImage(e.clientX, e.clientY);
+
+    if (e.button === 2) {
+        // Right-click: remove nearest
+        e.preventDefault();
+        const ann = findNearestAnnotation(ix, iy);
+        if (ann) {
+            removeAnnotation(ann.id);
+            setStatus(`Removed detection #${ann.id} (${['SC', 'Clump', 'Debris'][ann.category_id]})`);
+        }
+        return;
+    }
+
+    if (e.button === 0) {
+        if (state.polygonMode) {
+            // Polygon mode: add vertex
+            if (ix >= 0 && ix < state.imgWidth && iy >= 0 && iy < state.imgHeight) {
+                state.polygonPoints.push({x: Math.round(ix), y: Math.round(iy)});
+                drawOverlay();
+                setStatus(`Polygon: ${state.polygonPoints.length} points (double-click to close, Esc to cancel)`);
+            }
+            return;
+        }
+
+        // Normal mode: check if clicking INSIDE an existing annotation polygon
+        const ann = findAnnotationAtPoint(ix, iy);
+        if (ann) {
+            state.selectedId = ann.id;
+            drawOverlay();
+            setStatus(`Selected #${ann.id} (${['SC', 'Clump', 'Debris'][ann.category_id]}) - press 1/2/3 to reclassify`);
+        } else {
+            // Add new annotation
+            state.selectedId = null;
+            if (ix >= 0 && ix < state.imgWidth && iy >= 0 && iy < state.imgHeight) {
+                addAnnotation(Math.round(ix), Math.round(iy));
+                setStatus(`Added ${['SC', 'Clump', 'Debris'][state.activeClass]} at (${Math.round(ix)}, ${Math.round(iy)})`);
+            }
+        }
+    }
+});
+
+overlayCanvas.addEventListener('mousemove', (e) => {
+    if (state.isPanning) {
+        state.panX = e.clientX - state.panStartX;
+        state.panY = e.clientY - state.panStartY;
+        drawBg();
+        drawOverlay();
+        return;
+    }
+
+    const [ix, iy] = screenToImage(e.clientX, e.clientY);
+    document.getElementById('coords').textContent = `x: ${Math.round(ix)}, y: ${Math.round(iy)} | zoom: ${(state.zoom * 100).toFixed(0)}%`;
+});
+
+overlayCanvas.addEventListener('mouseup', () => {
+    state.isPanning = false;
+    overlayCanvas.style.cursor = 'crosshair';
+});
+
+overlayCanvas.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const [ix, iy] = screenToImage(e.clientX, e.clientY);
+    const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+    const newZoom = Math.max(0.1, Math.min(50, state.zoom * factor));
+
+    // Zoom toward cursor
+    state.panX -= ix * (newZoom - state.zoom);
+    state.panY -= iy * (newZoom - state.zoom);
+    state.zoom = newZoom;
+
+    drawBg();
+    drawOverlay();
+});
+
+overlayCanvas.addEventListener('contextmenu', (e) => e.preventDefault());
+
+// Double-click to close polygon
+overlayCanvas.addEventListener('dblclick', async (e) => {
+    if (!state.polygonMode || state.polygonPoints.length < 3) return;
+    e.preventDefault();
+
+    // Remove the last point (added by the second click of double-click)
+    if (state.polygonPoints.length > 3) {
+        state.polygonPoints.pop();
+    }
+
+    // Flatten points to [x1, y1, x2, y2, ...]
+    const flatPoly = [];
+    for (const pt of state.polygonPoints) {
+        flatPoly.push(pt.x, pt.y);
+    }
+
+    // Send to server
+    try {
+        const resp = await fetch('/api/add_polygon', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                well: state.well,
+                timepoint: state.timepoint,
+                polygon: flatPoly,
+                class_id: state.activeClass
+            })
+        });
+        const data = await resp.json();
+        if (data.status === 'ok') {
+            state.undoStack.push({action: 'add', annotation: data.annotation});
+            state.annotations.push(data.annotation);
+            setStatus(`Added polygon ${['SC', 'Clump', 'Debris'][state.activeClass]} (${state.polygonPoints.length} vertices)`);
+        }
+    } catch (err) {
+        setStatus(`Error: ${err.message}`);
+    }
+
+    state.polygonPoints = [];
+    drawOverlay();
+    updateStats();
+});
+
+// Keyboard
+document.addEventListener('keydown', (e) => {
+    if (e.key === ' ') {
+        e.preventDefault();
+        state.spaceHeld = true;
+        overlayCanvas.style.cursor = 'grab';
+    }
+    if (e.key === '1' || e.key === '2' || e.key === '3') {
+        const classId = parseInt(e.key) - 1;
+        if (state.selectedId !== null) {
+            reclassifyAnnotation(state.selectedId, classId);
+            setStatus(`Reclassified #${state.selectedId} to ${['SC', 'Clump', 'Debris'][classId]}`);
+        } else {
+            state.activeClass = classId;
+            document.querySelectorAll('.class-btn').forEach(b => b.classList.remove('active'));
+            document.getElementById(`class-btn-${classId}`).classList.add('active');
+            setStatus(`Active class: ${['SC', 'Clump', 'Debris'][classId]}`);
+        }
+    }
+    if ((e.key === 'z' || e.key === 'Z') && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        undoLastAction();
+    } else if (e.key === 'z' || e.key === 'Z') {
+        undoLastAction();
+    }
+    if (e.key === 'f' || e.key === 'F') {
+        fitToScreen();
+        drawBg();
+        drawOverlay();
+    }
+    if (e.key === 'g' || e.key === 'G') {
+        state.showGrid = !state.showGrid;
+        drawOverlay();
+        setStatus(`Grid: ${state.showGrid ? 'ON' : 'OFF'}`);
+    }
+    if (e.key === 'p' || e.key === 'P') {
+        state.polygonMode = !state.polygonMode;
+        state.polygonPoints = [];
+        const indicator = document.getElementById('mode-indicator');
+        if (state.polygonMode) {
+            indicator.classList.add('polygon-mode');
+            overlayCanvas.style.cursor = 'crosshair';
+        } else {
+            indicator.classList.remove('polygon-mode');
+        }
+        drawOverlay();
+        setStatus(`Polygon mode: ${state.polygonMode ? 'ON (click to add points, double-click to close)' : 'OFF'}`);
+    }
+    if (e.key === 'Escape') {
+        if (state.polygonMode && state.polygonPoints.length > 0) {
+            state.polygonPoints = [];
+            drawOverlay();
+            setStatus('Polygon cancelled');
+            return;
+        }
+        state.selectedId = null;
+        drawOverlay();
+    }
+    if ((e.key === 's' || e.key === 'S') && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        exportAnnotations();
+    }
+});
+
+document.addEventListener('keyup', (e) => {
+    if (e.key === ' ') {
+        state.spaceHeld = false;
+        overlayCanvas.style.cursor = 'crosshair';
+    }
+});
+
+// Undo
+async function undoLastAction() {
+    if (state.undoStack.length === 0) {
+        setStatus('Nothing to undo');
+        return;
+    }
+    const action = state.undoStack.pop();
+    if (action.action === 'add') {
+        // Undo add = remove it
+        await fetch(`/api/remove/${state.well}/${state.timepoint}/${action.annotation.id}`, {method: 'POST'});
+        state.annotations = state.annotations.filter(a => a.id !== action.annotation.id);
+    } else if (action.action === 'remove') {
+        // Undo remove = re-add it via direct push (already removed from server, re-add)
+        const resp = await fetch('/api/add', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                well: state.well,
+                timepoint: state.timepoint,
+                x: action.annotation.bbox[0] + action.annotation.bbox[2] / 2,
+                y: action.annotation.bbox[1] + action.annotation.bbox[3] / 2,
+                class_id: action.annotation.category_id
+            })
+        });
+        const data = await resp.json();
+        if (data.status === 'ok') {
+            state.annotations.push(data.annotation);
+        }
+    } else if (action.action === 'reclassify') {
+        await fetch(`/api/reclassify/${state.well}/${state.timepoint}/${action.annId}`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({class_id: action.oldClass})
+        });
+        const ann = state.annotations.find(a => a.id === action.annId);
+        if (ann) ann.category_id = action.oldClass;
+    }
+    drawOverlay();
+    updateStats();
+    setStatus('Undone last action');
+}
+
+document.getElementById('undo-btn').addEventListener('click', undoLastAction);
+
+// Class buttons
+document.querySelectorAll('.class-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+        const classId = parseInt(btn.dataset.class);
+        state.activeClass = classId;
+        document.querySelectorAll('.class-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+    });
+});
+
+// Opacity slider
+document.getElementById('opacity-slider').addEventListener('input', (e) => {
+    state.opacity = e.target.value / 100;
+    drawOverlay();
+});
+
+// Buttons
+document.getElementById('load-btn').addEventListener('click', loadFrame);
+document.getElementById('save-btn').addEventListener('click', exportAnnotations);
+document.getElementById('export-btn').addEventListener('click', exportAnnotations);
+
+// Window resize
+window.addEventListener('resize', () => {
+    resizeCanvases();
+    drawBg();
+    drawOverlay();
+});
+
+// Semi-annotation support
+async function scanFolder() {
+    const folder = document.getElementById('folder-input').value.trim();
+    if (!folder) {
+        setStatus('Paste a folder path first');
+        return;
+    }
+
+    setStatus('Scanning folder...');
+    try {
+        const resp = await fetch('/api/semiannotation/scan', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({folder: folder})
+        });
+        const data = await resp.json();
+
+        if (data.error) {
+            setStatus(`Error: ${data.error}`);
+            return;
+        }
+
+        // Populate dropdown
+        const sel = document.getElementById('semi-select');
+        sel.innerHTML = '';
+        for (const frame of data.frames) {
+            const opt = document.createElement('option');
+            opt.value = frame;
+            const match = frame.match(/_([KL]\d+)_.*_t(\d+)$/);
+            opt.textContent = match ? `${match[1]} t${parseInt(match[2])}` : frame;
+            sel.appendChild(opt);
+        }
+        sel.style.display = 'block';
+        document.getElementById('load-semi-btn').style.display = 'block';
+        document.getElementById('infer-semi-btn').style.display = 'block';
+        setStatus(`Found ${data.frames.length} frames, ${data.n_annotations} annotations`);
+    } catch (e) {
+        setStatus(`Error: ${e.message}`);
+    }
+}
+
+async function loadSemiFrames() {
+    // Check if server was started with --semiannotation-dir
+    try {
+        const resp = await fetch('/api/semiannotation/list');
+        const data = await resp.json();
+        if (data.frames && data.frames.length > 0) {
+            document.getElementById('folder-input').value = data.dir;
+            const sel = document.getElementById('semi-select');
+            sel.innerHTML = '';
+            for (const frame of data.frames) {
+                const opt = document.createElement('option');
+                opt.value = frame;
+                const match = frame.match(/_([KL]\d+)_.*_t(\d+)$/);
+                opt.textContent = match ? `${match[1]} t${parseInt(match[2])}` : frame;
+                sel.appendChild(opt);
+            }
+            sel.style.display = 'block';
+            document.getElementById('load-semi-btn').style.display = 'block';
+            document.getElementById('infer-semi-btn').style.display = 'block';
+        }
+    } catch (e) {
+        console.log('No semi-annotations pre-loaded');
+    }
+}
+
+document.getElementById('scan-folder-btn').addEventListener('click', scanFolder);
+// Also scan on Enter key in folder input
+document.getElementById('folder-input').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') scanFolder();
+});
+
+async function loadSemiFrame() {
+    const frameKey = document.getElementById('semi-select').value;
+    if (!frameKey) return;
+
+    state.well = 'semi';
+    state.timepoint = frameKey;
+    setStatus('Loading semi-annotated frame...');
+    document.getElementById('loading').style.display = 'block';
+    document.getElementById('loading').textContent = 'Loading pre-annotations...';
+
+    // Load image
+    const img = new Image();
+    img.onload = async () => {
+        state.bgImage = img;
+        state.imgWidth = img.width;
+        state.imgHeight = img.height;
+        resizeCanvases();
+        fitToScreen();
+        drawBg();
+
+        // Load pre-annotations
+        try {
+            const resp = await fetch(`/api/semiannotation/load/${frameKey}`);
+            const data = await resp.json();
+            state.annotations = data.annotations || [];
+            state.undoStack = [];
+            drawOverlay();
+            updateStats();
+            setStatus(`Loaded: ${state.annotations.length} pre-annotations`);
+        } catch (e) {
+            setStatus(`Error: ${e.message}`);
+        }
+        document.getElementById('loading').style.display = 'none';
+        document.getElementById('loading').textContent = 'Running inference...';
+    };
+    img.src = `/api/semiannotation/frame/${frameKey}?t=${Date.now()}`;
+}
+
+document.getElementById('load-semi-btn').addEventListener('click', loadSemiFrame);
+
+async function inferSemiFrame() {
+    const frameKey = document.getElementById('semi-select').value;
+    if (!frameKey) return;
+
+    state.well = 'semi';
+    state.timepoint = frameKey;
+    setStatus('Running inference on frame...');
+    document.getElementById('loading').style.display = 'block';
+    document.getElementById('loading').textContent = 'Running inference...';
+
+    // Load image
+    const img = new Image();
+    img.onload = async () => {
+        state.bgImage = img;
+        state.imgWidth = img.width;
+        state.imgHeight = img.height;
+        resizeCanvases();
+        fitToScreen();
+        drawBg();
+
+        // Run inference (replaces existing annotations)
+        try {
+            const resp = await fetch(`/api/semiannotation/infer/${frameKey}`);
+            const data = await resp.json();
+            if (data.error) {
+                setStatus(`Error: ${data.error}`);
+            } else {
+                state.annotations = data.annotations || [];
+                state.undoStack = [];
+                drawOverlay();
+                updateStats();
+                setStatus(`Inference done: ${state.annotations.length} detections (${data.inference_time}s)`);
+            }
+        } catch (e) {
+            setStatus(`Error: ${e.message}`);
+        }
+        document.getElementById('loading').style.display = 'none';
+        document.getElementById('loading').textContent = 'Running inference...';
+    };
+    img.src = `/api/semiannotation/frame/${frameKey}?t=${Date.now()}`;
+}
+
+document.getElementById('infer-semi-btn').addEventListener('click', inferSemiFrame);
+
+// ============================================================================
+// Init
+// ============================================================================
+loadFrames();
+loadSemiFrames();
+</script>
+</body>
+</html>
