@@ -1,11 +1,33 @@
+# Python
 __pycache__/
 *.pyc
-.env
+*.pyo
 *.egg-info/
 dist/
 build/
 .venv/
+*.egg
+
+# Model files (too large for git)
 *.pth
 *.pt
 *.ckpt
-EOF
+*.onnx
+
+# Environment
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project
+tasks/
+annotations_output/
+*.tiff
+*.nd2
