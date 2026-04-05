@@ -1,92 +1,122 @@
-"""
-BacDETR Annotation Correction Tool -- Flask Backend
+"""Insegment -- Flask backend for interactive annotation.
 
-Start: python annotation_server.py --checkpoint path/to/checkpoint.pth
-Open:  http://localhost:5000
-
-Workflow:
-1. Select a well + timepoint from the dropdown
-2. Model runs inference -> detections appear as colored overlays
-3. Left-click empty area = ADD cell (circle mask, default class = single-cell)
-4. Right-click detection = REMOVE it
-5. Click detection + press 1/2/3 = reclassify
-6. Export -> saves COCO JSON to output directory
+This module defines the Flask web application. It is started by the CLI
+(insegment.cli) or can be imported and configured programmatically.
 """
 
-import argparse
 import io
 import json
 import math
-import os
-import sys
 import time
 from pathlib import Path
 
 import numpy as np
 import tifffile
+from flask import Flask, jsonify, render_template, request, send_file
 from PIL import Image
 
-# Add HiTMicTools to path
-sys.path.insert(0, "C:/Users/sergi/HiTMicTools/src")
+from insegment.models.base import SegmentationResult
 
-from flask import Flask, jsonify, render_template, request, send_file
-
+# ---------------------------------------------------------------------------
+# Flask app
+# ---------------------------------------------------------------------------
 app = Flask(__name__)
 
-# Global state
+# Global state -- shared across requests (single-process server).
+# In production you'd use a database, but for a local annotation tool this is fine.
 STATE = {
-    "checkpoint": None,
-    "tiff_dir": None,
-    "output_dir": None,
-    "segmenter": None,
-    "cache": {},  # (well, tp) -> detection data
-    "edits": {},  # (well, tp) -> list of edits applied
-    "annotations": {},  # (well, tp) -> current annotation state
-    "cell_radius": 4,  # default radius for added cells (pixels)
+    "segmenter": None,           # Model instance (BaseSegmenter subclass) or None
+    "tiff_dir": None,            # Path to directory with transformed TIFFs
+    "output_dir": None,          # Path for exported annotation files
+    "cache": {},                 # (well, tp) -> detection data
+    "edits": {},                 # (well, tp) -> list of edits applied
+    "annotations": {},           # (well, tp) -> current annotation state
+    "cell_radius": 4,            # default radius for manually added cells (pixels)
+    "class_names": {0: "single-cell", 1: "clump", 2: "debris"},  # default labels
 }
 
-CLASS_NAMES = {0: "single-cell", 1: "clump", 2: "debris"}
+
+def configure_app(
+    segmenter=None,
+    tiff_dir=None,
+    output_dir=None,
+    cell_radius=4,
+    semiannotation_dir=None,
+):
+    """Configure the app with a model and paths.
+
+    Args:
+        segmenter: An instance of BaseSegmenter (or None for annotation-only mode).
+        tiff_dir: Path to folder containing *_transformed.tiff files.
+        output_dir: Path where exported annotations are saved.
+        cell_radius: Radius in pixels for manually added circle annotations.
+        semiannotation_dir: Path to folder with PNGs + _annotations.coco.json.
+    """
+    STATE["segmenter"] = segmenter
+    STATE["tiff_dir"] = tiff_dir
+    STATE["output_dir"] = output_dir or "./annotations_output"
+    STATE["cell_radius"] = cell_radius
+
+    # Update class names from model if available
+    if segmenter is not None:
+        STATE["class_names"] = segmenter.class_names
+
+    # Load semi-annotation directory if provided
+    if semiannotation_dir:
+        _load_semiannotation_dir(semiannotation_dir)
 
 
-def get_segmenter():
-    """Lazy-load ScSegmenter."""
-    if STATE["segmenter"] is None:
-        from HiTMicTools.model_components.scsegmenter import ScSegmenter
+def _load_semiannotation_dir(semi_dir):
+    """Load a semi-annotation directory (PNGs + COCO JSON)."""
+    semi_dir = Path(semi_dir)
+    coco_file = semi_dir / "_annotations.coco.json"
+    if not coco_file.exists():
+        print(f"WARNING: No _annotations.coco.json in {semi_dir}")
+        return
 
-        STATE["segmenter"] = ScSegmenter(
-            model_path=STATE["checkpoint"],
-            patch_size=256,
-            overlap_ratio=0.33,
-            score_threshold=0.40,
-            nms_iou=0.4,
-            clump_merge_min_overlap=250,
-            priority_overlap_fraction=0.5,
-            temporal_buffer_size=1,
-            batch_size=32,
-            mask_threshold=0.5,
-            class_dict=CLASS_NAMES,
-            model_type="bacdetr",
-        )
-    return STATE["segmenter"]
+    STATE["semiannotation_dir"] = str(semi_dir)
+    frames = {}
+    with open(coco_file) as f:
+        coco = json.load(f)
+    for img in coco["images"]:
+        png_path = semi_dir / img["file_name"]
+        if png_path.exists():
+            name = img["file_name"].replace(".png", "")
+            frames[name] = {
+                "filename": img["file_name"],
+                "path": str(png_path),
+                "width": img["width"],
+                "height": img["height"],
+            }
+    STATE["semiannotation_frames"] = frames
+    print(f"Semi-annotations: {len(frames)} frames from {semi_dir}")
+    for k in frames:
+        print(f"  - {k}")
 
+
+# ---------------------------------------------------------------------------
+# Helper functions
+# ---------------------------------------------------------------------------
 
 def list_tiff_files():
     """List available wells from transformed TIFFs."""
-    tiff_dir = Path(STATE["tiff_dir"])
+    tiff_dir = STATE.get("tiff_dir")
+    if not tiff_dir:
+        return {}
+    tiff_dir = Path(tiff_dir)
+    if not tiff_dir.exists():
+        return {}
+
     wells = {}
     for f in sorted(tiff_dir.glob("*_transformed.tiff")):
-        # Parse well from filename: {date}_{exp}_{well}_p{plate}_transformed.tiff
         parts = f.stem.replace("_transformed", "").split("_")
-        # Well is typically the second-to-last part before p01
         for i, part in enumerate(parts):
             if part.startswith("p") and part[1:].isdigit():
                 well = parts[i - 1]
-                plate = part
                 break
         else:
             continue
 
-        # Count timepoints
         with tifffile.TiffFile(str(f)) as tif:
             n_pages = len(tif.pages)
             n_timepoints = n_pages // 2  # BF + FL alternating
@@ -115,7 +145,11 @@ def load_frame(well, timepoint):
 
 
 def mask_to_polygon(binary_mask):
-    """Convert binary mask to polygon contour (COCO format)."""
+    """Convert binary mask to polygon contour (COCO format).
+
+    Uses OpenCV to find the contour of a binary mask and returns it as a
+    flat list of coordinates [x1, y1, x2, y2, ...] -- the format COCO uses.
+    """
     import cv2
 
     contours, _ = cv2.findContours(
@@ -123,17 +157,15 @@ def mask_to_polygon(binary_mask):
     )
     if not contours:
         return None
-    # Take largest contour
     contour = max(contours, key=cv2.contourArea)
     if len(contour) < 3:
         return None
-    # Flatten to [x1, y1, x2, y2, ...]
     polygon = contour.flatten().tolist()
     return polygon
 
 
 def circle_polygon(cx, cy, radius, n_points=12):
-    """Generate a circle polygon as [x1,y1,x2,y2,...] for COCO."""
+    """Generate a circle as a polygon [x1, y1, x2, y2, ...] for COCO format."""
     points = []
     for i in range(n_points):
         angle = 2 * math.pi * i / n_points
@@ -153,27 +185,27 @@ def run_inference(well, timepoint):
     if frame is None:
         return None
 
-    seg = get_segmenter()
+    segmenter = STATE.get("segmenter")
+    if segmenter is None:
+        # No model loaded -- return empty annotations (annotation-only mode)
+        return {
+            "well": well,
+            "timepoint": timepoint,
+            "width": int(frame.shape[1]),
+            "height": int(frame.shape[0]),
+            "annotations": [],
+            "inference_time": 0,
+            "next_id": 0,
+        }
+
     t0 = time.time()
-    masks, bboxes_list, class_ids_list, scores_list = seg.predict(
-        frame,
-        channel_index=0,
-        temporal_buffer_size=1,
-        batch_size=32,
-        normalize_to_255=True,
-        output_shape="HW",
-    )
+    result = segmenter.predict(frame)
     elapsed = time.time() - t0
 
-    # Handle output shapes
-    if isinstance(bboxes_list, list) and len(bboxes_list) > 0:
-        bboxes = bboxes_list[0]
-        class_ids = class_ids_list[0]
-        scores = scores_list[0]
-    else:
-        bboxes = bboxes_list
-        class_ids = class_ids_list
-        scores = scores_list
+    masks = result.masks
+    bboxes = result.bboxes
+    class_ids = result.class_ids
+    scores = result.scores
 
     if masks.ndim == 3:
         masks = masks[0]
@@ -191,24 +223,21 @@ def run_inference(well, timepoint):
         if polygon is None:
             continue
 
-        # bbox: xyxy -> xywh for COCO
         x1, y1, x2, y2 = bboxes[i]
         bbox_xywh = [float(x1), float(y1), float(x2 - x1), float(y2 - y1)]
         area = float(bbox_xywh[2] * bbox_xywh[3])
 
-        annotations.append(
-            {
-                "id": i,
-                "category_id": int(class_ids[i]),
-                "bbox": bbox_xywh,
-                "area": area,
-                "segmentation": [polygon],
-                "score": float(scores[i]),
-                "source": "model",  # vs "manual"
-            }
-        )
+        annotations.append({
+            "id": i,
+            "category_id": int(class_ids[i]),
+            "bbox": bbox_xywh,
+            "area": area,
+            "segmentation": [polygon],
+            "score": float(scores[i]),
+            "source": "model",
+        })
 
-    result = {
+    ann_result = {
         "well": well,
         "timepoint": timepoint,
         "width": int(frame.shape[1]),
@@ -218,14 +247,13 @@ def run_inference(well, timepoint):
         "next_id": n_detections,
     }
 
-    STATE["annotations"][cache_key] = result
-    return result
+    STATE["annotations"][cache_key] = ann_result
+    return ann_result
 
 
-# ============================================================================
+# ---------------------------------------------------------------------------
 # Routes
-# ============================================================================
-
+# ---------------------------------------------------------------------------
 
 @app.route("/")
 def index():
@@ -240,7 +268,6 @@ def api_frames():
         well: {"n_timepoints": info["n_timepoints"], "filename": info["filename"]}
         for well, info in wells.items()
     }
-    # Also list pre-annotated frames from semiannotation dirs
     if STATE.get("semiannotation_dir"):
         result["__semiannotation__"] = {
             "n_timepoints": 0,
@@ -267,7 +294,6 @@ def api_semiannotation_scan():
     if not folder_path.exists():
         return jsonify({"error": f"Folder not found: {folder}"}), 404
 
-    # Look for COCO JSON (try common names)
     coco_file = None
     for name in ["_annotations.coco.json", "annotations.coco.json", "annotations.json"]:
         candidate = folder_path / name
@@ -275,7 +301,6 @@ def api_semiannotation_scan():
             coco_file = candidate
             break
 
-    # Also check for any .json file
     if coco_file is None:
         json_files = list(folder_path.glob("*.json"))
         if len(json_files) == 1:
@@ -284,11 +309,9 @@ def api_semiannotation_scan():
     if coco_file is None:
         return jsonify({"error": "No COCO JSON found in folder. Expected _annotations.coco.json"}), 404
 
-    # Parse COCO JSON
     with open(coco_file) as f:
         coco = json.load(f)
 
-    # Discover frames
     frames = {}
     for img in coco.get("images", []):
         png_path = folder_path / img["file_name"]
@@ -304,10 +327,8 @@ def api_semiannotation_scan():
     if not frames:
         return jsonify({"error": "No matching PNG files found for images in COCO JSON"}), 404
 
-    # Store in state and clear annotation cache (switching folders)
     STATE["semiannotation_dir"] = str(folder_path)
     STATE["semiannotation_frames"] = frames
-    # Clear cached annotations so frames reload from new folder
     semi_keys = [k for k in STATE["annotations"] if k[0] == "semi"]
     for k in semi_keys:
         del STATE["annotations"][k]
@@ -329,25 +350,22 @@ def api_semiannotation_load(frame_key):
 
     frame_info = frames[frame_key]
     cache_key = ("semi", frame_key)
+    class_names = STATE["class_names"]
 
     if cache_key in STATE["annotations"]:
         return jsonify(STATE["annotations"][cache_key])
 
-    # Check if a corrected version exists (from previous session)
+    # Check if a corrected version exists
     corrected_path = Path(STATE["output_dir"]) / f"{frame_key}_annotations.json"
     if corrected_path.exists():
         with open(corrected_path) as f:
             corrected_coco = json.load(f)
 
-        # Build category map (COCO 1-indexed -> 0-indexed)
         cat_map = {}
         for cat in corrected_coco.get("categories", []):
-            if cat["name"] == "single-cell":
-                cat_map[cat["id"]] = 0
-            elif cat["name"] == "clump":
-                cat_map[cat["id"]] = 1
-            elif cat["name"] == "debris":
-                cat_map[cat["id"]] = 2
+            for idx, name in class_names.items():
+                if cat["name"] == name:
+                    cat_map[cat["id"]] = idx
 
         annotations = []
         for ann in corrected_coco.get("annotations", []):
@@ -375,12 +393,11 @@ def api_semiannotation_load(frame_key):
         STATE["annotations"][cache_key] = result
         return jsonify(result)
 
-    # Load COCO annotations for this frame (original semi-annotation)
+    # Load from original COCO annotations
     coco_path = Path(STATE["semiannotation_dir"]) / "_annotations.coco.json"
     with open(coco_path) as f:
         coco = json.load(f)
 
-    # Find matching image
     img_entry = None
     for img in coco["images"]:
         if img["file_name"] == frame_info["filename"]:
@@ -390,17 +407,12 @@ def api_semiannotation_load(frame_key):
     if img_entry is None:
         return jsonify({"error": "Image not found in COCO JSON"}), 404
 
-    # Build category map (COCO 1-indexed -> 0-indexed)
     cat_map = {}
     for cat in coco["categories"]:
-        if cat["name"] == "single-cell":
-            cat_map[cat["id"]] = 0
-        elif cat["name"] == "clump":
-            cat_map[cat["id"]] = 1
-        elif cat["name"] == "debris":
-            cat_map[cat["id"]] = 2
+        for idx, name in class_names.items():
+            if cat["name"] == name:
+                cat_map[cat["id"]] = idx
 
-    # Get annotations for this image
     annotations = []
     for ann in coco["annotations"]:
         if ann["image_id"] == img_entry["id"]:
@@ -441,45 +453,32 @@ def api_semiannotation_frame(frame_key):
 
 @app.route("/api/semiannotation/infer/<frame_key>")
 def api_semiannotation_infer(frame_key):
-    """Run model inference on a semi-annotation PNG (instead of TIFF)."""
+    """Run model inference on a semi-annotation PNG."""
     frames = STATE.get("semiannotation_frames", {})
     if frame_key not in frames:
         return jsonify({"error": f"Frame '{frame_key}' not found"}), 404
 
-    cache_key = ("semi", frame_key)
+    segmenter = STATE.get("segmenter")
+    if segmenter is None:
+        return jsonify({"error": "No model loaded. Start with --model to enable inference."}), 400
 
-    # Load the PNG as a numpy array
+    cache_key = ("semi", frame_key)
     frame_info = frames[frame_key]
-    img = Image.open(frame_info["path"]).convert("L")  # grayscale
+    img = Image.open(frame_info["path"]).convert("L")
     frame = np.array(img)
 
-    # Run inference
-    seg = get_segmenter()
     t0 = time.time()
-    masks, bboxes_list, class_ids_list, scores_list = seg.predict(
-        frame,
-        channel_index=0,
-        temporal_buffer_size=1,
-        batch_size=32,
-        normalize_to_255=True,
-        output_shape="HW",
-    )
+    result = segmenter.predict(frame)
     elapsed = time.time() - t0
 
-    # Handle output shapes
-    if isinstance(bboxes_list, list) and len(bboxes_list) > 0:
-        bboxes = bboxes_list[0]
-        class_ids = class_ids_list[0]
-        scores = scores_list[0]
-    else:
-        bboxes = bboxes_list
-        class_ids = class_ids_list
-        scores = scores_list
+    masks = result.masks
+    bboxes = result.bboxes
+    class_ids = result.class_ids
+    scores = result.scores
 
     if masks.ndim == 3:
         masks = masks[0]
 
-    # Convert to annotation list
     annotations = []
     n_detections = len(class_ids) if hasattr(class_ids, "__len__") else 0
     for i in range(n_detections):
@@ -496,19 +495,17 @@ def api_semiannotation_infer(frame_key):
         bbox_xywh = [float(x1), float(y1), float(x2 - x1), float(y2 - y1)]
         area = float(bbox_xywh[2] * bbox_xywh[3])
 
-        annotations.append(
-            {
-                "id": i,
-                "category_id": int(class_ids[i]),
-                "bbox": bbox_xywh,
-                "area": area,
-                "segmentation": [polygon],
-                "score": float(scores[i]),
-                "source": "model",
-            }
-        )
+        annotations.append({
+            "id": i,
+            "category_id": int(class_ids[i]),
+            "bbox": bbox_xywh,
+            "area": area,
+            "segmentation": [polygon],
+            "score": float(scores[i]),
+            "source": "model",
+        })
 
-    result = {
+    ann_result = {
         "well": "semi",
         "timepoint": frame_key,
         "width": int(frame.shape[1]),
@@ -518,8 +515,8 @@ def api_semiannotation_infer(frame_key):
         "next_id": n_detections,
     }
 
-    STATE["annotations"][cache_key] = result
-    return jsonify(result)
+    STATE["annotations"][cache_key] = ann_result
+    return jsonify(ann_result)
 
 
 @app.route("/api/frame/<well>/<int:timepoint>")
@@ -529,7 +526,6 @@ def api_frame(well, timepoint):
     if frame is None:
         return jsonify({"error": "Frame not found"}), 404
 
-    # Normalize to uint8
     frame_f = frame.astype(np.float32)
     frame_f = (frame_f - frame_f.min()) / (frame_f.max() - frame_f.min() + 1e-6) * 255
     img = Image.fromarray(frame_f.astype(np.uint8))
@@ -557,7 +553,7 @@ def api_add():
     timepoint = data["timepoint"]
     x = data["x"]
     y = data["y"]
-    class_id = data.get("class_id", 0)  # default: single-cell
+    class_id = data.get("class_id", 0)
 
     cache_key = (well, timepoint)
     if cache_key not in STATE["annotations"]:
@@ -593,8 +589,8 @@ def api_add_polygon():
     data = request.json
     well = data["well"]
     timepoint = data["timepoint"]
-    polygon = data["polygon"]  # flat list [x1, y1, x2, y2, ...]
-    class_id = data.get("class_id", 1)  # default: clump
+    polygon = data["polygon"]
+    class_id = data.get("class_id", 1)
 
     cache_key = (well, timepoint)
     if cache_key not in STATE["annotations"]:
@@ -603,14 +599,12 @@ def api_add_polygon():
     ann_data = STATE["annotations"][cache_key]
     next_id = ann_data["next_id"]
 
-    # Compute bbox from polygon
     xs = [polygon[i] for i in range(0, len(polygon), 2)]
     ys = [polygon[i] for i in range(1, len(polygon), 2)]
     x_min, x_max = min(xs), max(xs)
     y_min, y_max = min(ys), max(ys)
     bbox = [x_min, y_min, x_max - x_min, y_max - y_min]
 
-    # Compute area using shoelace formula
     n = len(xs)
     area = 0.0
     for i in range(n):
@@ -641,7 +635,7 @@ def api_remove(well, timepoint, ann_id):
     try:
         timepoint = int(timepoint)
     except ValueError:
-        pass  # keep as string for semi-annotations
+        pass
     cache_key = (well, timepoint)
     if cache_key not in STATE["annotations"]:
         return jsonify({"error": "No annotations loaded"}), 400
@@ -679,7 +673,6 @@ def api_reclassify(well, timepoint, ann_id):
 @app.route("/api/export/<well>/<timepoint>")
 def api_export(well, timepoint):
     """Export current annotations as COCO JSON."""
-    # Handle both integer timepoints and string keys (for semiannotation)
     try:
         tp = int(timepoint)
         cache_key = (well, tp)
@@ -692,27 +685,27 @@ def api_export(well, timepoint):
         return jsonify({"error": "No annotations to export"}), 400
 
     ann_data = STATE["annotations"][cache_key]
+    class_names = STATE["class_names"]
 
-    # Use original filename if from semiannotation
     if well == "semi" and timepoint in STATE.get("semiannotation_frames", {}):
         file_name = STATE["semiannotation_frames"][timepoint]["filename"]
     else:
         file_name = f"{file_label}.png"
 
+    # Build COCO categories from class_names (1-indexed for COCO standard)
+    categories = [
+        {"id": idx + 1, "name": name}
+        for idx, name in sorted(class_names.items())
+    ]
+
     coco = {
-        "images": [
-            {
-                "id": 0,
-                "file_name": file_name,
-                "width": ann_data["width"],
-                "height": ann_data["height"],
-            }
-        ],
-        "categories": [
-            {"id": 1, "name": "single-cell"},
-            {"id": 2, "name": "clump"},
-            {"id": 3, "name": "debris"},
-        ],
+        "images": [{
+            "id": 0,
+            "file_name": file_name,
+            "width": ann_data["width"],
+            "height": ann_data["height"],
+        }],
+        "categories": categories,
         "annotations": [
             {
                 "id": i,
@@ -727,7 +720,6 @@ def api_export(well, timepoint):
         ],
     }
 
-    # Save to output directory
     out_dir = Path(STATE["output_dir"])
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"{file_label}_annotations.json"
@@ -762,7 +754,6 @@ def api_tile_info(well, timepoint):
             x1 = min(x0 + tile_size, ann_data["width"])
             y1 = min(y0 + tile_size, ann_data["height"])
 
-            # Count annotations in this tile
             n_anns = 0
             for ann in ann_data["annotations"]:
                 bbox = ann["bbox"]
@@ -788,12 +779,11 @@ def api_tile_info(well, timepoint):
 
 @app.route("/api/tile/<well>/<timepoint>/<int:row>/<int:col>")
 def api_tile(well, timepoint, row, col):
-    """Serve a single tile with coordinate grid overlay and existing annotations marked."""
+    """Serve a single tile with coordinate grid overlay and annotations."""
     import cv2
 
     tile_size = 432
 
-    # Load the frame image
     try:
         tp = int(timepoint)
         cache_key = (well, tp)
@@ -801,7 +791,6 @@ def api_tile(well, timepoint, row, col):
         cache_key = (well, timepoint)
         tp = timepoint
 
-    # Get the raw image
     if well == "semi":
         frames = STATE.get("semiannotation_frames", {})
         if tp not in frames:
@@ -819,20 +808,20 @@ def api_tile(well, timepoint, row, col):
     x1 = min(x0 + tile_size, w)
     y1 = min(y0 + tile_size, h)
 
-    # Crop tile
     tile = frame[y0:y1, x0:x1]
 
-    # Normalize to uint8
     tile_f = tile.astype(np.float32)
     tile_f = (tile_f - tile_f.min()) / (tile_f.max() - tile_f.min() + 1e-6) * 255
     tile_u8 = tile_f.astype(np.uint8)
 
-    # Upscale 2x for better visibility
     scale = 2
     tile_rgb = cv2.cvtColor(tile_u8, cv2.COLOR_GRAY2RGB)
-    tile_rgb = cv2.resize(tile_rgb, (tile_rgb.shape[1] * scale, tile_rgb.shape[0] * scale), interpolation=cv2.INTER_NEAREST)
+    tile_rgb = cv2.resize(
+        tile_rgb,
+        (tile_rgb.shape[1] * scale, tile_rgb.shape[0] * scale),
+        interpolation=cv2.INTER_NEAREST,
+    )
 
-    # Draw coordinate grid (every 50px in image space = every 100px in display)
     for gx in range(0, tile_size + 1, 50):
         dx = gx * scale
         if dx <= tile_rgb.shape[1]:
@@ -842,7 +831,6 @@ def api_tile(well, timepoint, row, col):
         if dy <= tile_rgb.shape[0]:
             cv2.line(tile_rgb, (0, dy), (tile_rgb.shape[1], dy), (80, 80, 80), 1)
 
-    # Add axis labels (image coordinates)
     for gx in range(0, tile_size + 1, 50):
         dx = gx * scale
         if dx <= tile_rgb.shape[1]:
@@ -854,7 +842,6 @@ def api_tile(well, timepoint, row, col):
             label = str(y0 + gy)
             cv2.putText(tile_rgb, label, (3, dy - 3), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 0), 1)
 
-    # Draw existing annotations in this tile (thick, solid outlines)
     if cache_key in STATE["annotations"]:
         ann_data = STATE["annotations"][cache_key]
         colors = {0: (76, 175, 80), 1: (244, 67, 54), 2: (255, 235, 59)}
@@ -863,7 +850,6 @@ def api_tile(well, timepoint, row, col):
             if not seg or not seg[0] or len(seg[0]) < 6:
                 continue
             poly = seg[0]
-            # Convert to tile-local coordinates, then scale 2x
             pts = []
             in_tile = False
             for i in range(0, len(poly), 2):
@@ -875,18 +861,14 @@ def api_tile(well, timepoint, row, col):
                 continue
             pts_np = np.array(pts, dtype=np.int32)
             color = colors.get(ann["category_id"], (128, 128, 128))
-            # Thick outline + semi-transparent fill
             cv2.polylines(tile_rgb, [pts_np], True, color, 2)
-            # Centroid dot
             cx = int(np.mean([p[0] for p in pts]))
             cy = int(np.mean([p[1] for p in pts]))
             cv2.circle(tile_rgb, (cx, cy), 4, color, -1)
 
-    # Tile label (top-right corner)
     label = f"R{row}C{col} ({x0},{y0})"
     cv2.putText(tile_rgb, label, (tile_rgb.shape[1] - 240, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 200), 1)
 
-    # Convert to PNG
     img_pil = Image.fromarray(tile_rgb)
     buf = io.BytesIO()
     img_pil.save(buf, format="PNG")
@@ -907,90 +889,15 @@ def api_stats(well, timepoint):
 
     ann_data = STATE["annotations"][cache_key]
     anns = ann_data["annotations"]
+    class_names = STATE["class_names"]
 
     stats = {
         "total": len(anns),
-        "single_cell": sum(1 for a in anns if a["category_id"] == 0),
-        "clump": sum(1 for a in anns if a["category_id"] == 1),
-        "debris": sum(1 for a in anns if a["category_id"] == 2),
         "model": sum(1 for a in anns if a.get("source") == "model"),
         "manual": sum(1 for a in anns if a.get("source") == "manual"),
     }
+    # Add per-class counts using dynamic class names
+    for idx, name in class_names.items():
+        stats[name] = sum(1 for a in anns if a["category_id"] == idx)
+
     return jsonify(stats)
-
-
-def main():
-    parser = argparse.ArgumentParser(description="BacDETR Annotation Correction Tool")
-    parser.add_argument(
-        "--checkpoint",
-        type=str,
-        default="C:/Users/sergi/ExperimentsWindows/e009_BacDETR/training/checkpoints/checkpoint_best_v13_total.pth",
-        help="Path to model checkpoint",
-    )
-    parser.add_argument(
-        "--tiff-dir",
-        type=str,
-        default="C:/Users/sergi/ExperimentsWindows/e009_BacDETR/transformed_p01",
-        help="Path to transformed TIFF directory",
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=str,
-        default="C:/Users/sergi/ExperimentsWindows/e009_BacDETR/annotations_corrected",
-        help="Output directory for exported COCO JSON",
-    )
-    parser.add_argument("--port", type=int, default=5000)
-    parser.add_argument("--cell-radius", type=int, default=4, help="Radius for manually added cells")
-    parser.add_argument(
-        "--semiannotation-dir",
-        type=str,
-        default=None,
-        help="Path to semiannotation directory (PNGs + _annotations.coco.json)",
-    )
-
-    args = parser.parse_args()
-    STATE["checkpoint"] = args.checkpoint
-    STATE["tiff_dir"] = args.tiff_dir
-    STATE["output_dir"] = args.output_dir
-    STATE["cell_radius"] = args.cell_radius
-
-    # Load semi-annotation directory if provided
-    if args.semiannotation_dir:
-        semi_dir = Path(args.semiannotation_dir)
-        coco_file = semi_dir / "_annotations.coco.json"
-        if coco_file.exists():
-            STATE["semiannotation_dir"] = str(semi_dir)
-            # Discover frames
-            frames = {}
-            with open(coco_file) as f:
-                coco = json.load(f)
-            for img in coco["images"]:
-                png_path = semi_dir / img["file_name"]
-                if png_path.exists():
-                    # Key: e.g. "K11_t24"
-                    name = img["file_name"].replace(".png", "")
-                    # Extract well and timepoint for display
-                    frames[name] = {
-                        "filename": img["file_name"],
-                        "path": str(png_path),
-                        "width": img["width"],
-                        "height": img["height"],
-                    }
-            STATE["semiannotation_frames"] = frames
-            print(f"Semi-annotations: {len(frames)} frames from {semi_dir}")
-            for k in frames:
-                print(f"  - {k}")
-        else:
-            print(f"WARNING: No _annotations.coco.json in {semi_dir}")
-
-    print(f"Checkpoint: {args.checkpoint}")
-    print(f"TIFF dir:   {args.tiff_dir}")
-    print(f"Output dir: {args.output_dir}")
-    print(f"Cell radius: {args.cell_radius}px")
-    print(f"Starting server on http://localhost:{args.port}")
-
-    app.run(host="0.0.0.0", port=args.port, debug=False)
-
-
-if __name__ == "__main__":
-    main()
