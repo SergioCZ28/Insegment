@@ -22,6 +22,22 @@ from insegment.models.base import SegmentationResult
 # ---------------------------------------------------------------------------
 app = Flask(__name__)
 
+# A palette of 10 visually distinct colors. When a user adds a new class,
+# it automatically gets the next color from this list (cycling back to the
+# start after 10). Users can override individual colors via the UI.
+DEFAULT_COLORS = [
+    "#4caf50",  # green
+    "#f44336",  # red
+    "#ffeb3b",  # yellow
+    "#2196f3",  # blue
+    "#9c27b0",  # purple
+    "#ff9800",  # orange
+    "#00bcd4",  # cyan
+    "#e91e63",  # pink
+    "#8bc34a",  # lime
+    "#795548",  # brown
+]
+
 # Global state -- shared across requests (single-process server).
 # In production you'd use a database, but for a local annotation tool this is fine.
 STATE = {
@@ -33,6 +49,7 @@ STATE = {
     "annotations": {},           # (well, tp) -> current annotation state
     "cell_radius": 4,            # default radius for manually added cells (pixels)
     "class_names": {0: "single-cell", 1: "clump", 2: "debris"},  # default labels
+    "class_colors": {0: "#4caf50", 1: "#f44336", 2: "#ffeb3b"},  # default colors
 }
 
 
@@ -60,6 +77,12 @@ def configure_app(
     # Update class names from model if available
     if segmenter is not None:
         STATE["class_names"] = segmenter.class_names
+
+    # Assign colors to each class (cycling through the palette)
+    STATE["class_colors"] = {
+        idx: DEFAULT_COLORS[idx % len(DEFAULT_COLORS)]
+        for idx in STATE["class_names"]
+    }
 
     # Load semi-annotation directory if provided
     if semiannotation_dir:
@@ -128,6 +151,46 @@ def list_tiff_files():
             "filename": f.name,
         }
     return wells
+
+
+def build_category_map(coco_categories):
+    """Map COCO category IDs to our internal class IDs.
+
+    If a COCO category name already exists in our class_names, map to that ID.
+    If it's a new name we haven't seen, auto-create a new class for it
+    (with the next available ID and an auto-assigned color).
+
+    This way, importing a COCO file with categories like "leaf", "stem", "root"
+    automatically creates those classes in the UI.
+
+    Args:
+        coco_categories: list of dicts from COCO JSON, e.g.
+            [{"id": 1, "name": "leaf"}, {"id": 2, "name": "stem"}]
+
+    Returns:
+        dict mapping COCO category ID -> internal class ID
+    """
+    cat_map = {}
+    # Build reverse lookup: name -> internal ID
+    name_to_id = {name: idx for idx, name in STATE["class_names"].items()}
+
+    for cat in coco_categories:
+        coco_id = cat["id"]
+        name = cat["name"]
+
+        if name in name_to_id:
+            # Already exists -- map to existing internal ID
+            cat_map[coco_id] = name_to_id[name]
+        else:
+            # New category -- auto-create it
+            next_id = max(STATE["class_names"].keys()) + 1 if STATE["class_names"] else 0
+            STATE["class_names"][next_id] = name
+            STATE["class_colors"][next_id] = DEFAULT_COLORS[next_id % len(DEFAULT_COLORS)]
+            name_to_id[name] = next_id
+            cat_map[coco_id] = next_id
+            print(f"  Auto-created class: {name} (id={next_id})")
+
+    return cat_map
 
 
 def load_frame(well, timepoint):
@@ -252,12 +315,157 @@ def run_inference(well, timepoint):
 
 
 # ---------------------------------------------------------------------------
+# Helper: convert hex color to RGB tuple (for tile rendering)
+# ---------------------------------------------------------------------------
+
+def hex_to_rgb(hex_color):
+    """Convert '#4caf50' -> (76, 175, 80). Used for OpenCV tile rendering."""
+    h = hex_color.lstrip("#")
+    return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
+
+
+# ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
 
 @app.route("/")
 def index():
     return render_template("index.html")
+
+
+# ---------------------------------------------------------------------------
+# Label management API
+# ---------------------------------------------------------------------------
+
+@app.route("/api/labels")
+def api_labels():
+    """Return current label configuration (names, colors, IDs).
+
+    The frontend calls this on page load to know what classes exist
+    and how to render them. Nothing is hardcoded in the HTML anymore.
+    """
+    labels = []
+    for idx in sorted(STATE["class_names"].keys()):
+        labels.append({
+            "id": idx,
+            "name": STATE["class_names"][idx],
+            "color": STATE["class_colors"].get(idx, DEFAULT_COLORS[idx % len(DEFAULT_COLORS)]),
+        })
+    return jsonify({"labels": labels})
+
+
+@app.route("/api/labels/rename", methods=["POST"])
+def api_labels_rename():
+    """Rename a label class. This is a 'bulk rename' -- it updates the class
+    name everywhere, including all cached annotations' display names.
+
+    The actual annotation data uses integer IDs (category_id), not names,
+    so renaming doesn't change any annotation data. It only changes
+    what name is displayed in the UI and exported in COCO JSON.
+
+    Body: {"id": 0, "new_name": "single-cell"}
+    """
+    data = request.json
+    class_id = data["id"]
+    new_name = data["new_name"].strip()
+
+    if class_id not in STATE["class_names"]:
+        return jsonify({"error": f"Class ID {class_id} not found"}), 404
+    if not new_name:
+        return jsonify({"error": "Name cannot be empty"}), 400
+
+    old_name = STATE["class_names"][class_id]
+    STATE["class_names"][class_id] = new_name
+
+    return jsonify({
+        "status": "ok",
+        "old_name": old_name,
+        "new_name": new_name,
+        "id": class_id,
+    })
+
+
+@app.route("/api/labels/add", methods=["POST"])
+def api_labels_add():
+    """Add a new label class.
+
+    Body: {"name": "mitotic", "color": "#ff00ff"}  (color is optional)
+    """
+    data = request.json
+    name = data.get("name", "").strip()
+    if not name:
+        return jsonify({"error": "Name is required"}), 400
+
+    # Find the next available ID (one higher than the current max)
+    next_id = max(STATE["class_names"].keys()) + 1 if STATE["class_names"] else 0
+
+    # Assign color: use provided color, or auto-pick from palette
+    color = data.get("color") or DEFAULT_COLORS[next_id % len(DEFAULT_COLORS)]
+
+    STATE["class_names"][next_id] = name
+    STATE["class_colors"][next_id] = color
+
+    return jsonify({
+        "status": "ok",
+        "id": next_id,
+        "name": name,
+        "color": color,
+    })
+
+
+@app.route("/api/labels/remove", methods=["POST"])
+def api_labels_remove():
+    """Remove a label class.
+
+    Body: {"id": 3}
+
+    WARNING: This does NOT delete annotations that use this class.
+    Those annotations will still exist with the old category_id,
+    but they won't match any class name anymore. The frontend
+    should warn the user about this.
+    """
+    data = request.json
+    class_id = data["id"]
+
+    if class_id not in STATE["class_names"]:
+        return jsonify({"error": f"Class ID {class_id} not found"}), 404
+
+    if len(STATE["class_names"]) <= 1:
+        return jsonify({"error": "Cannot remove the last class"}), 400
+
+    # Count how many annotations use this class (across all frames)
+    n_affected = 0
+    for ann_data in STATE["annotations"].values():
+        n_affected += sum(
+            1 for a in ann_data["annotations"] if a["category_id"] == class_id
+        )
+
+    removed_name = STATE["class_names"].pop(class_id)
+    STATE["class_colors"].pop(class_id, None)
+
+    return jsonify({
+        "status": "ok",
+        "removed_name": removed_name,
+        "removed_id": class_id,
+        "affected_annotations": n_affected,
+    })
+
+
+@app.route("/api/labels/color", methods=["POST"])
+def api_labels_color():
+    """Change the color of a label class.
+
+    Body: {"id": 0, "color": "#ff5722"}
+    """
+    data = request.json
+    class_id = data["id"]
+    color = data["color"]
+
+    if class_id not in STATE["class_names"]:
+        return jsonify({"error": f"Class ID {class_id} not found"}), 404
+
+    STATE["class_colors"][class_id] = color
+    return jsonify({"status": "ok", "id": class_id, "color": color})
 
 
 @app.route("/api/frames")
@@ -361,11 +569,7 @@ def api_semiannotation_load(frame_key):
         with open(corrected_path) as f:
             corrected_coco = json.load(f)
 
-        cat_map = {}
-        for cat in corrected_coco.get("categories", []):
-            for idx, name in class_names.items():
-                if cat["name"] == name:
-                    cat_map[cat["id"]] = idx
+        cat_map = build_category_map(corrected_coco.get("categories", []))
 
         annotations = []
         for ann in corrected_coco.get("annotations", []):
@@ -407,11 +611,7 @@ def api_semiannotation_load(frame_key):
     if img_entry is None:
         return jsonify({"error": "Image not found in COCO JSON"}), 404
 
-    cat_map = {}
-    for cat in coco["categories"]:
-        for idx, name in class_names.items():
-            if cat["name"] == name:
-                cat_map[cat["id"]] = idx
+    cat_map = build_category_map(coco["categories"])
 
     annotations = []
     for ann in coco["annotations"]:
@@ -844,7 +1044,9 @@ def api_tile(well, timepoint, row, col):
 
     if cache_key in STATE["annotations"]:
         ann_data = STATE["annotations"][cache_key]
-        colors = {0: (76, 175, 80), 1: (244, 67, 54), 2: (255, 235, 59)}
+        colors = {
+            idx: hex_to_rgb(c) for idx, c in STATE["class_colors"].items()
+        }
         for ann in ann_data["annotations"]:
             seg = ann.get("segmentation", [[]])
             if not seg or not seg[0] or len(seg[0]) < 6:
