@@ -238,6 +238,53 @@ def circle_polygon(cx, cy, radius, n_points=12):
     return points
 
 
+def rectangle_polygon(cx, cy, width, height):
+    """Generate a rectangle as a polygon [x1, y1, x2, y2, ...] for COCO format."""
+    hw, hh = width / 2, height / 2
+    return [
+        round(cx - hw, 1), round(cy - hh, 1),
+        round(cx + hw, 1), round(cy - hh, 1),
+        round(cx + hw, 1), round(cy + hh, 1),
+        round(cx - hw, 1), round(cy + hh, 1),
+    ]
+
+
+def ellipse_polygon(cx, cy, rx, ry, n_points=24):
+    """Generate an ellipse as a polygon [x1, y1, x2, y2, ...] for COCO format."""
+    points = []
+    for i in range(n_points):
+        angle = 2 * math.pi * i / n_points
+        x = cx + rx * math.cos(angle)
+        y = cy + ry * math.sin(angle)
+        points.extend([round(x, 1), round(y, 1)])
+    return points
+
+
+def polygon_bbox_area(flat_polygon):
+    """Compute bbox [x, y, w, h] and area from a flat polygon list.
+
+    Uses the shoelace formula for area.
+
+    Returns:
+        (bbox, area) tuple.
+    """
+    xs = flat_polygon[0::2]
+    ys = flat_polygon[1::2]
+    min_x, max_x = min(xs), max(xs)
+    min_y, max_y = min(ys), max(ys)
+    bbox = [round(min_x, 1), round(min_y, 1),
+            round(max_x - min_x, 1), round(max_y - min_y, 1)]
+    # Shoelace formula
+    n = len(xs)
+    area = 0.0
+    for i in range(n):
+        j = (i + 1) % n
+        area += xs[i] * ys[j]
+        area -= xs[j] * ys[i]
+    area = abs(area) / 2.0
+    return bbox, round(area, 1)
+
+
 def run_inference(well, timepoint):
     """Run model inference and cache results."""
     cache_key = (well, timepoint)
@@ -490,6 +537,36 @@ def api_semiannotation_list():
     """List available semi-annotated frames."""
     frames = STATE.get("semiannotation_frames", {})
     return jsonify({"frames": list(frames.keys()), "dir": STATE.get("semiannotation_dir", "")})
+
+
+@app.route("/api/browse_folder")
+def api_browse_folder():
+    """Open native OS folder picker and return the selected path."""
+    import threading
+
+    result = {"path": None}
+
+    def pick():
+        try:
+            import tkinter as tk
+            from tkinter import filedialog
+            root = tk.Tk()
+            root.withdraw()
+            root.attributes("-topmost", True)
+            path = filedialog.askdirectory(title="Select annotation folder")
+            root.destroy()
+            result["path"] = path if path else None
+        except Exception:
+            result["path"] = None
+
+    # tkinter must run in a thread to avoid blocking Flask
+    t = threading.Thread(target=pick)
+    t.start()
+    t.join(timeout=120)
+
+    if result["path"]:
+        return jsonify({"status": "ok", "path": result["path"]})
+    return jsonify({"status": "cancelled"})
 
 
 @app.route("/api/semiannotation/scan", methods=["POST"])
@@ -747,13 +824,24 @@ def api_detections(well, timepoint):
 
 @app.route("/api/add", methods=["POST"])
 def api_add():
-    """Add a new annotation at (x, y)."""
+    """Add a new annotation at (x, y).
+
+    Accepts optional 'shape' and 'params' fields for different shape types.
+    Defaults to circle with STATE["cell_radius"] when not specified.
+
+    Shapes:
+        circle:    params = {radius}
+        rectangle: params = {width, height}
+        ellipse:   params = {rx, ry}
+    """
     data = request.json
     well = data["well"]
     timepoint = data["timepoint"]
     x = data["x"]
     y = data["y"]
     class_id = data.get("class_id", 0)
+    shape = data.get("shape", "circle")
+    params = data.get("params", {})
 
     cache_key = (well, timepoint)
     if cache_key not in STATE["annotations"]:
@@ -762,16 +850,25 @@ def api_add():
     ann_data = STATE["annotations"][cache_key]
     next_id = ann_data["next_id"]
 
-    radius = STATE["cell_radius"]
-    polygon = circle_polygon(x, y, radius)
-    bbox = [x - radius, y - radius, 2 * radius, 2 * radius]
-    area = math.pi * radius * radius
+    if shape == "rectangle":
+        w = params.get("width", STATE["cell_radius"] * 2)
+        h = params.get("height", STATE["cell_radius"] * 2)
+        polygon = rectangle_polygon(x, y, w, h)
+    elif shape == "ellipse":
+        rx = params.get("rx", STATE["cell_radius"])
+        ry = params.get("ry", STATE["cell_radius"] * 0.7)
+        polygon = ellipse_polygon(x, y, rx, ry)
+    else:
+        radius = params.get("radius", STATE["cell_radius"])
+        polygon = circle_polygon(x, y, radius)
+
+    bbox, area = polygon_bbox_area(polygon)
 
     new_ann = {
         "id": next_id,
         "category_id": class_id,
         "bbox": bbox,
-        "area": round(area, 1),
+        "area": area,
         "segmentation": [polygon],
         "score": 1.0,
         "source": "manual",
@@ -799,25 +896,13 @@ def api_add_polygon():
     ann_data = STATE["annotations"][cache_key]
     next_id = ann_data["next_id"]
 
-    xs = [polygon[i] for i in range(0, len(polygon), 2)]
-    ys = [polygon[i] for i in range(1, len(polygon), 2)]
-    x_min, x_max = min(xs), max(xs)
-    y_min, y_max = min(ys), max(ys)
-    bbox = [x_min, y_min, x_max - x_min, y_max - y_min]
-
-    n = len(xs)
-    area = 0.0
-    for i in range(n):
-        j = (i + 1) % n
-        area += xs[i] * ys[j]
-        area -= xs[j] * ys[i]
-    area = abs(area) / 2.0
+    bbox, area = polygon_bbox_area(polygon)
 
     new_ann = {
         "id": next_id,
         "category_id": class_id,
         "bbox": bbox,
-        "area": round(area, 1),
+        "area": area,
         "segmentation": [polygon],
         "score": 1.0,
         "source": "manual",
@@ -870,63 +955,162 @@ def api_reclassify(well, timepoint, ann_id):
     return jsonify({"error": "Annotation not found"}), 404
 
 
-@app.route("/api/export/<well>/<timepoint>")
-def api_export(well, timepoint):
-    """Export current annotations as COCO JSON."""
+def _build_coco_dict(ann_data, class_names, file_name):
+    """Build a COCO-format dict from annotation data.
+
+    Delegates to the canonical exporter to avoid duplication.
+    Used by autosave (which always writes COCO format).
+    """
+    from insegment.exporters import export_coco
+    return export_coco(ann_data, class_names, file_name)
+
+
+def _resolve_cache_key(well, timepoint):
+    """Parse well/timepoint into a (cache_key, file_label) tuple."""
     try:
         tp = int(timepoint)
-        cache_key = (well, tp)
-        file_label = f"{well}_t{tp:02d}"
+        return (well, tp), f"{well}_t{tp:02d}"
     except ValueError:
-        cache_key = (well, timepoint)
-        file_label = timepoint
+        return (well, timepoint), timepoint
+
+
+def _get_file_name(well, timepoint, file_label):
+    """Get the image file name for export/autosave."""
+    if well == "semi" and timepoint in STATE.get("semiannotation_frames", {}):
+        return STATE["semiannotation_frames"][timepoint]["filename"]
+    return f"{file_label}.png"
+
+
+@app.route("/api/export/<well>/<timepoint>")
+def api_export(well, timepoint):
+    """Export annotations in the requested format (default: coco).
+
+    Query params:
+        format: coco | yolo | csv | voc (default: coco)
+    """
+    from insegment.exporters import export_coco, export_yolo, export_csv, export_voc
+
+    cache_key, file_label = _resolve_cache_key(well, timepoint)
 
     if cache_key not in STATE["annotations"]:
         return jsonify({"error": "No annotations to export"}), 400
 
     ann_data = STATE["annotations"][cache_key]
     class_names = STATE["class_names"]
-
-    if well == "semi" and timepoint in STATE.get("semiannotation_frames", {}):
-        file_name = STATE["semiannotation_frames"][timepoint]["filename"]
-    else:
-        file_name = f"{file_label}.png"
-
-    # Build COCO categories from class_names (1-indexed for COCO standard)
-    categories = [
-        {"id": idx + 1, "name": name}
-        for idx, name in sorted(class_names.items())
-    ]
-
-    coco = {
-        "images": [{
-            "id": 0,
-            "file_name": file_name,
-            "width": ann_data["width"],
-            "height": ann_data["height"],
-        }],
-        "categories": categories,
-        "annotations": [
-            {
-                "id": i,
-                "image_id": 0,
-                "category_id": a["category_id"] + 1,  # 0-indexed -> 1-indexed for COCO
-                "bbox": a["bbox"],
-                "area": a["area"],
-                "segmentation": a["segmentation"],
-                "iscrowd": 0,
-            }
-            for i, a in enumerate(ann_data["annotations"])
-        ],
-    }
+    file_name = _get_file_name(well, timepoint, file_label)
+    fmt = request.args.get("format", "coco")
 
     out_dir = Path(STATE["output_dir"])
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"{file_label}_annotations.json"
+
+    if fmt == "yolo":
+        content = export_yolo(ann_data, class_names, ann_data["width"], ann_data["height"])
+        out_path = out_dir / f"{file_label}_annotations.txt"
+        with open(out_path, "w") as f:
+            f.write(content)
+    elif fmt == "csv":
+        content = export_csv(ann_data, class_names, file_name)
+        out_path = out_dir / f"{file_label}_annotations.csv"
+        with open(out_path, "w") as f:
+            f.write(content)
+    elif fmt == "voc":
+        content = export_voc(ann_data, class_names, file_name, ann_data["width"], ann_data["height"])
+        out_path = out_dir / f"{file_label}_annotations.xml"
+        with open(out_path, "w") as f:
+            f.write(content)
+    else:
+        # Default: COCO JSON
+        coco = export_coco(ann_data, class_names, file_name)
+        out_path = out_dir / f"{file_label}_annotations.json"
+        with open(out_path, "w") as f:
+            json.dump(coco, f, indent=2)
+
+    # Clear the autosave file since user explicitly saved
+    autosave_path = out_dir / f"{file_label}_autosave.json"
+    if autosave_path.exists():
+        autosave_path.unlink()
+
+    n_ann = len(ann_data["annotations"])
+    return jsonify({"status": "ok", "path": str(out_path), "format": fmt, "n_annotations": n_ann})
+
+
+@app.route("/api/autosave", methods=["POST"])
+def api_autosave():
+    """Auto-save annotations to a recovery file."""
+    data = request.get_json()
+    well = data.get("well")
+    timepoint = data.get("timepoint")
+    cache_key, file_label = _resolve_cache_key(well, timepoint)
+
+    if cache_key not in STATE["annotations"]:
+        return jsonify({"error": "No annotations loaded"}), 400
+
+    ann_data = STATE["annotations"][cache_key]
+    file_name = _get_file_name(well, timepoint, file_label)
+    coco = _build_coco_dict(ann_data, STATE["class_names"], file_name)
+
+    out_dir = Path(STATE["output_dir"])
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"{file_label}_autosave.json"
     with open(out_path, "w") as f:
         json.dump(coco, f, indent=2)
 
-    return jsonify({"status": "ok", "path": str(out_path), "n_annotations": len(coco["annotations"])})
+    return jsonify({"status": "ok", "path": str(out_path)})
+
+
+@app.route("/api/autosave/<well>/<timepoint>")
+def api_get_autosave(well, timepoint):
+    """Check if an autosave exists and return its annotations."""
+    _cache_key, file_label = _resolve_cache_key(well, timepoint)
+    out_dir = Path(STATE["output_dir"])
+    autosave_path = out_dir / f"{file_label}_autosave.json"
+
+    if not autosave_path.exists():
+        return jsonify({"has_autosave": False})
+
+    with open(autosave_path) as f:
+        coco = json.load(f)
+
+    # Convert COCO back to internal format (1-indexed -> 0-indexed)
+    annotations = []
+    for ann in coco.get("annotations", []):
+        annotations.append({
+            "id": ann["id"],
+            "category_id": ann["category_id"] - 1,
+            "bbox": ann["bbox"],
+            "area": ann["area"],
+            "segmentation": ann["segmentation"],
+            "score": 1.0,
+            "source": "manual",
+        })
+
+    return jsonify({
+        "has_autosave": True,
+        "annotations": annotations,
+        "n_annotations": len(annotations),
+        "path": str(autosave_path),
+    })
+
+
+@app.route("/api/restore", methods=["POST"])
+def api_restore():
+    """Bulk-load annotations (for autosave recovery)."""
+    data = request.get_json()
+    well = data.get("well")
+    timepoint = data.get("timepoint")
+    annotations = data.get("annotations", [])
+    cache_key, _file_label = _resolve_cache_key(well, timepoint)
+
+    if cache_key not in STATE["annotations"]:
+        return jsonify({"error": "Frame not loaded"}), 400
+
+    ann_data = STATE["annotations"][cache_key]
+    ann_data["annotations"] = annotations
+    # Update next_id to be above the max existing ID
+    max_id = max((a["id"] for a in annotations), default=-1)
+    ann_data["next_id"] = max_id + 1
+
+    return jsonify({"status": "ok", "n_annotations": len(annotations)})
 
 
 @app.route("/api/tile_info/<well>/<timepoint>")
