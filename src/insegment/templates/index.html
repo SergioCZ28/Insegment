@@ -72,8 +72,9 @@ canvas { position: absolute; top: 0; left: 0; image-rendering: pixelated; }
 
     <hr style="border-color: #333;">
     <label>Load from folder (PNGs + COCO JSON)</label>
-    <input type="text" id="folder-input" placeholder="Paste folder path here..." style="font-size: 11px;">
-    <button id="scan-folder-btn" style="background: #e65100;">Scan Folder</button>
+    <button id="browse-folder-btn" style="background: #e65100;">Browse Folder...</button>
+    <input type="text" id="folder-input" placeholder="...or paste path here" style="font-size: 11px;">
+    <button id="scan-folder-btn" style="background: #e65100; font-size: 11px;">Scan</button>
     <select id="semi-select" style="display:none;"><option value="">-- Select frame --</option></select>
     <div style="display: flex; gap: 4px;">
         <button id="load-semi-btn" style="background: #e65100; display:none; flex:1;">Load Annotations</button>
@@ -94,6 +95,32 @@ canvas { position: absolute; top: 0; left: 0; image-rendering: pixelated; }
         <input type="range" id="opacity-slider" class="opacity-slider" min="0" max="100" value="40">
     </div>
 
+    <div id="presets-panel">
+        <label>Shape Presets <span style="font-size:10px;color:#666;">click to activate</span></label>
+        <div id="preset-buttons" style="display:flex; gap:4px; margin-top:4px; flex-wrap:wrap;"></div>
+        <button id="save-preset-btn" style="font-size:11px; background:#0f3460; margin-top:4px;">+ Save Current as Preset</button>
+    </div>
+
+    <div id="stamp-params-panel">
+        <label>Stamp Size <span style="font-size:10px;color:#666;">(for click-to-place)</span></label>
+        <div id="stamp-circle-params" style="display:flex; gap:4px; align-items:center; margin-top:4px;">
+            <span style="font-size:11px; color:#999; min-width:45px;">Radius:</span>
+            <input type="number" id="stamp-radius" value="4" min="1" max="200" step="0.5" style="flex:1;">
+        </div>
+        <div id="stamp-rect-params" style="display:none; gap:4px; align-items:center; margin-top:4px;">
+            <span style="font-size:11px; color:#999; min-width:45px;">W:</span>
+            <input type="number" id="stamp-width" value="10" min="1" max="500" step="0.5" style="flex:1;">
+            <span style="font-size:11px; color:#999; min-width:20px;">H:</span>
+            <input type="number" id="stamp-height" value="8" min="1" max="500" step="0.5" style="flex:1;">
+        </div>
+        <div id="stamp-ellipse-params" style="display:none; gap:4px; align-items:center; margin-top:4px;">
+            <span style="font-size:11px; color:#999; min-width:45px;">RX:</span>
+            <input type="number" id="stamp-rx" value="6" min="1" max="200" step="0.5" style="flex:1;">
+            <span style="font-size:11px; color:#999; min-width:20px;">RY:</span>
+            <input type="number" id="stamp-ry" value="4" min="1" max="200" step="0.5" style="flex:1;">
+        </div>
+    </div>
+
     <hr style="border-color: #333;">
 
     <div id="stats-panel">
@@ -106,24 +133,34 @@ canvas { position: absolute; top: 0; left: 0; image-rendering: pixelated; }
         <div class="stat-row"><span class="stat-label">Manual:</span><span class="stat-value" id="stat-manual">-</span></div>
     </div>
 
+    <div id="save-status" style="display:flex; align-items:center; gap:6px; font-size:12px;">
+        <span id="save-dot" style="width:8px; height:8px; border-radius:50%; background:#4caf50; display:inline-block;"></span>
+        <span id="save-text">Saved</span>
+    </div>
     <button id="save-btn" style="background: #2e7d32;">Save (Ctrl+S)</button>
-    <button id="export-btn">Export COCO JSON</button>
+    <div style="position:relative;">
+        <button id="export-btn">Export As...</button>
+        <div id="export-menu" class="context-menu" style="display:none; position:absolute; bottom:100%; left:0; margin-bottom:4px;">
+            <div class="context-menu-item" data-format="coco">COCO JSON</div>
+            <div class="context-menu-item" data-format="yolo">YOLO TXT</div>
+            <div class="context-menu-item" data-format="csv">CSV</div>
+            <div class="context-menu-item" data-format="voc">Pascal VOC XML</div>
+        </div>
+    </div>
     <button id="undo-btn" class="danger">Undo Last Action</button>
 
     <hr style="border-color: #333;">
 
     <div class="help-text">
         <strong>Controls:</strong><br>
-        Left-click: Add cell at cursor<br>
-        Right-click: Remove nearest detection<br>
-        Click detection + 1/2/3: Reclassify<br>
-        P: Toggle polygon draw mode<br>
-        G: Toggle 3x3 grid overlay<br>
-        Scroll: Zoom in/out<br>
-        Space+drag or Shift+drag: Pan<br>
-        Ctrl+S: Save<br>
-        F: Fit to screen<br>
-        Esc: Deselect / cancel polygon
+        Left-click: Place shape / select<br>
+        Right-click: Remove nearest<br>
+        1-9: Class select / reclassify<br>
+        <strong>Tools:</strong> C=Circle R=Rect E=Ellipse P=Polygon L=Lasso<br>
+        D: Toggle stamp/drag mode<br>
+        G: Grid | F: Fit | Z: Undo<br>
+        Space+drag: Pan | Scroll: Zoom<br>
+        Ctrl+S: Save | Esc: Cancel
     </div>
 
     <div id="status">Ready</div>
@@ -133,6 +170,15 @@ canvas { position: absolute; top: 0; left: 0; image-rendering: pixelated; }
     <canvas id="bg-canvas"></canvas>
     <canvas id="overlay-canvas"></canvas>
     <div id="loading">Running inference...</div>
+    <div id="toolbar">
+        <button class="tool-btn active-tool" data-tool="circle" title="Circle (C)">&#9675; Circle</button>
+        <button class="tool-btn" data-tool="rectangle" title="Rectangle (R)">&#9645; Rect</button>
+        <button class="tool-btn" data-tool="ellipse" title="Ellipse (E)">&#11044; Ellipse</button>
+        <button class="tool-btn" data-tool="polygon" title="Polygon (P)">&#11040; Polygon</button>
+        <button class="tool-btn" data-tool="freeform" title="Freeform (L)">&#10000; Lasso</button>
+        <span style="border-left:1px solid rgba(255,255,255,0.3); margin:0 2px;"></span>
+        <button id="mode-toggle-btn" title="Toggle stamp/drag (D)">Stamp</button>
+    </div>
     <div id="mode-indicator">POLYGON MODE (click to add points, double-click to close)</div>
     <div id="coords">x: 0, y: 0</div>
 </div>
@@ -165,9 +211,32 @@ const state = {
     bgImage: null,
     // Grid overlay
     showGrid: false,
+    // Shape tools
+    activeTool: 'circle',   // circle | rectangle | ellipse | polygon | freeform
+    toolMode: 'stamp',      // stamp | drag
+    stampParams: {
+        circle: { radius: 4 },
+        rectangle: { width: 10, height: 8 },
+        ellipse: { rx: 6, ry: 4 },
+    },
+    // Drag mode state
+    isDragging: false,
+    dragStartX: 0,
+    dragStartY: 0,
+    dragCurrentX: 0,
+    dragCurrentY: 0,
+    // Mouse position in image coords (for polygon preview line)
+    mouseImageX: 0,
+    mouseImageY: 0,
     // Polygon drawing mode
     polygonMode: false,
     polygonPoints: [],  // [{x, y}, ...]
+    // Freeform drawing
+    isDrawingFreeform: false,
+    freeformPoints: [],  // [{x, y}, ...]
+    // Auto-save
+    unsavedChanges: false,
+    autoSaveTimer: null,
 };
 
 // Label configuration -- fetched from server on startup.
@@ -267,9 +336,12 @@ async function loadFrame() {
             const data = await resp.json();
             state.annotations = data.annotations || [];
             state.undoStack = [];
+            updateSaveIndicator('saved');
             drawOverlay();
             updateStats();
             setStatus(`Loaded: ${state.annotations.length} detections in ${data.inference_time}s`);
+            // Check for autosave recovery after frame loads
+            await checkAutosaveRecovery();
         } catch (e) {
             setStatus(`Error: ${e.message}`);
         }
@@ -278,17 +350,255 @@ async function loadFrame() {
     img.src = `/api/frame/${well}/${tp}?t=${Date.now()}`;
 }
 
+// ============================================================================
+// Auto-save
+// ============================================================================
+function updateSaveIndicator(status) {
+    const dot = document.getElementById('save-dot');
+    const text = document.getElementById('save-text');
+    if (status === 'unsaved') {
+        dot.style.background = '#ffeb3b';
+        text.textContent = 'Unsaved changes';
+    } else if (status === 'saving') {
+        dot.style.background = '#2196f3';
+        text.textContent = 'Saving...';
+    } else {
+        dot.style.background = '#4caf50';
+        text.textContent = 'Saved';
+    }
+}
+
+function markUnsaved() {
+    state.unsavedChanges = true;
+    updateSaveIndicator('unsaved');
+    if (state.autoSaveTimer) clearTimeout(state.autoSaveTimer);
+    state.autoSaveTimer = setTimeout(doAutoSave, 2000);
+}
+
+async function doAutoSave() {
+    if (!state.well || !state.unsavedChanges) return;
+    updateSaveIndicator('saving');
+    try {
+        // Server-side autosave
+        await fetch('/api/autosave', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({well: state.well, timepoint: state.timepoint})
+        });
+        // localStorage backup
+        const key = `insegment_autosave_${state.well}_${state.timepoint}`;
+        localStorage.setItem(key, JSON.stringify({
+            annotations: state.annotations,
+            timestamp: Date.now(),
+        }));
+        state.unsavedChanges = false;
+        updateSaveIndicator('saved');
+    } catch (e) {
+        updateSaveIndicator('unsaved');
+        console.error('Autosave failed:', e);
+    }
+}
+
+async function checkAutosaveRecovery() {
+    if (!state.well) return;
+    // Check localStorage first (faster)
+    const key = `insegment_autosave_${state.well}_${state.timepoint}`;
+    const stored = localStorage.getItem(key);
+    if (stored) {
+        const parsed = JSON.parse(stored);
+        if (parsed.annotations && parsed.annotations.length > 0) {
+            const age = Math.round((Date.now() - parsed.timestamp) / 1000);
+            const mins = Math.floor(age / 60);
+            const timeStr = mins > 0 ? `${mins}m ${age % 60}s` : `${age}s`;
+            if (confirm(`Found auto-saved annotations (${parsed.annotations.length} annotations, ${timeStr} ago). Restore?`)) {
+                state.annotations = parsed.annotations;
+                // Push to server
+                await fetch('/api/restore', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        well: state.well,
+                        timepoint: state.timepoint,
+                        annotations: parsed.annotations
+                    })
+                });
+                drawOverlay();
+                updateStats();
+                setStatus(`Restored ${parsed.annotations.length} annotations from autosave`);
+                return;
+            }
+        }
+    }
+    // Also check server-side autosave
+    try {
+        const resp = await fetch(`/api/autosave/${state.well}/${state.timepoint}`);
+        const data = await resp.json();
+        if (data.has_autosave && data.n_annotations > 0) {
+            if (confirm(`Found server auto-save (${data.n_annotations} annotations). Restore?`)) {
+                state.annotations = data.annotations;
+                await fetch('/api/restore', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        well: state.well,
+                        timepoint: state.timepoint,
+                        annotations: data.annotations
+                    })
+                });
+                drawOverlay();
+                updateStats();
+                setStatus(`Restored ${data.n_annotations} annotations from server autosave`);
+            }
+        }
+    } catch (e) { /* no server autosave */ }
+}
+
+function clearAutosave() {
+    if (!state.well) return;
+    const key = `insegment_autosave_${state.well}_${state.timepoint}`;
+    localStorage.removeItem(key);
+    state.unsavedChanges = false;
+    updateSaveIndicator('saved');
+}
+
+// ============================================================================
+// Tool switching + stamp params
+// ============================================================================
+function setActiveTool(tool) {
+    state.activeTool = tool;
+    // Sync polygonMode flag for backward compat
+    state.polygonMode = (tool === 'polygon');
+    // Update toolbar button highlights
+    document.querySelectorAll('.tool-btn').forEach(btn => {
+        btn.classList.toggle('active-tool', btn.dataset.tool === tool);
+    });
+    // Show/hide stamp params
+    const isStampShape = ['circle', 'rectangle', 'ellipse'].includes(tool);
+    document.getElementById('stamp-params-panel').style.display = isStampShape ? 'block' : 'none';
+    document.getElementById('stamp-circle-params').style.display = tool === 'circle' ? 'flex' : 'none';
+    document.getElementById('stamp-rect-params').style.display = tool === 'rectangle' ? 'flex' : 'none';
+    document.getElementById('stamp-ellipse-params').style.display = tool === 'ellipse' ? 'flex' : 'none';
+    // Update mode indicator
+    const indicator = document.getElementById('mode-indicator');
+    if (tool === 'polygon') {
+        indicator.textContent = 'POLYGON MODE (click to add points, double-click or click first point to close)';
+        indicator.className = 'polygon-mode';
+        indicator.style.display = 'block';
+    } else if (tool === 'freeform') {
+        indicator.textContent = 'FREEFORM MODE (click+drag to draw, release to close)';
+        indicator.className = 'polygon-mode';
+        indicator.style.display = 'block';
+    } else {
+        indicator.style.display = 'none';
+    }
+    // Cancel any in-progress polygon/freeform
+    state.polygonPoints = [];
+    state.freeformPoints = [];
+    state.isDrawingFreeform = false;
+    state.isDragging = false;
+    drawOverlay();
+}
+
+function toggleToolMode() {
+    state.toolMode = state.toolMode === 'stamp' ? 'drag' : 'stamp';
+    document.getElementById('mode-toggle-btn').textContent = state.toolMode === 'stamp' ? 'Stamp' : 'Drag';
+    document.getElementById('mode-toggle-btn').classList.toggle('active-tool', state.toolMode === 'drag');
+}
+
+function syncStampParams() {
+    state.stampParams.circle.radius = parseFloat(document.getElementById('stamp-radius').value) || 4;
+    state.stampParams.rectangle.width = parseFloat(document.getElementById('stamp-width').value) || 10;
+    state.stampParams.rectangle.height = parseFloat(document.getElementById('stamp-height').value) || 8;
+    state.stampParams.ellipse.rx = parseFloat(document.getElementById('stamp-rx').value) || 6;
+    state.stampParams.ellipse.ry = parseFloat(document.getElementById('stamp-ry').value) || 4;
+}
+
+// ============================================================================
+// Shape presets
+// ============================================================================
+let shapePresets = JSON.parse(localStorage.getItem('insegment_presets') || '[]');
+
+function renderPresets() {
+    const container = document.getElementById('preset-buttons');
+    container.innerHTML = '';
+    shapePresets.forEach((preset, idx) => {
+        const btn = document.createElement('div');
+        btn.className = 'class-btn';
+        btn.style.background = '#0f3460';
+        btn.style.fontSize = '10px';
+        btn.style.padding = '4px 6px';
+        btn.style.cursor = 'pointer';
+        btn.title = `${preset.tool} ${preset.mode} - right-click to delete`;
+        btn.textContent = preset.name;
+        btn.addEventListener('click', () => {
+            setActiveTool(preset.tool);
+            state.toolMode = preset.mode;
+            document.getElementById('mode-toggle-btn').textContent = preset.mode === 'stamp' ? 'Stamp' : 'Drag';
+            document.getElementById('mode-toggle-btn').classList.toggle('active-tool', preset.mode === 'drag');
+            if (preset.params) {
+                state.stampParams[preset.tool] = {...preset.params};
+                // Sync UI inputs
+                if (preset.tool === 'circle') document.getElementById('stamp-radius').value = preset.params.radius || 4;
+                if (preset.tool === 'rectangle') {
+                    document.getElementById('stamp-width').value = preset.params.width || 10;
+                    document.getElementById('stamp-height').value = preset.params.height || 8;
+                }
+                if (preset.tool === 'ellipse') {
+                    document.getElementById('stamp-rx').value = preset.params.rx || 6;
+                    document.getElementById('stamp-ry').value = preset.params.ry || 4;
+                }
+            }
+            setStatus(`Preset: ${preset.name}`);
+        });
+        btn.addEventListener('contextmenu', (ev) => {
+            ev.preventDefault();
+            if (confirm(`Delete preset "${preset.name}"?`)) {
+                shapePresets.splice(idx, 1);
+                localStorage.setItem('insegment_presets', JSON.stringify(shapePresets));
+                renderPresets();
+            }
+        });
+        container.appendChild(btn);
+    });
+}
+
+function savePreset() {
+    const tool = state.activeTool;
+    if (!['circle', 'rectangle', 'ellipse'].includes(tool)) {
+        setStatus('Presets only for circle/rectangle/ellipse');
+        return;
+    }
+    syncStampParams();
+    const name = prompt('Preset name:', `${tool} ${JSON.stringify(state.stampParams[tool])}`);
+    if (!name) return;
+    shapePresets.push({
+        name,
+        tool,
+        mode: state.toolMode,
+        params: {...state.stampParams[tool]},
+    });
+    localStorage.setItem('insegment_presets', JSON.stringify(shapePresets));
+    renderPresets();
+    setStatus(`Saved preset: ${name}`);
+}
+
+renderPresets();
+
 async function addAnnotation(x, y) {
+    syncStampParams();
+    const body = {
+        well: state.well,
+        timepoint: state.timepoint,
+        x: x,
+        y: y,
+        class_id: state.activeClass,
+        shape: state.activeTool,
+        params: state.stampParams[state.activeTool] || {},
+    };
     const resp = await fetch('/api/add', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({
-            well: state.well,
-            timepoint: state.timepoint,
-            x: x,
-            y: y,
-            class_id: state.activeClass
-        })
+        body: JSON.stringify(body)
     });
     const data = await resp.json();
     if (data.status === 'ok') {
@@ -296,6 +606,7 @@ async function addAnnotation(x, y) {
         state.annotations.push(data.annotation);
         drawOverlay();
         updateStats();
+        markUnsaved();
     }
 }
 
@@ -310,6 +621,7 @@ async function removeAnnotation(annId) {
         state.annotations = state.annotations.filter(a => a.id !== annId);
         drawOverlay();
         updateStats();
+        markUnsaved();
     }
 }
 
@@ -327,19 +639,21 @@ async function reclassifyAnnotation(annId, newClass) {
         ann.category_id = newClass;
         drawOverlay();
         updateStats();
+        markUnsaved();
     }
 }
 
-async function exportAnnotations() {
+async function exportAnnotations(format = 'coco') {
     if (!state.well) return;
     const saveBtn = document.getElementById('save-btn');
     const exportBtn = document.getElementById('export-btn');
     saveBtn.textContent = 'Saving...';
     exportBtn.textContent = 'Saving...';
     try {
-        const resp = await fetch(`/api/export/${state.well}/${state.timepoint}`);
+        const resp = await fetch(`/api/export/${state.well}/${state.timepoint}?format=${format}`);
         const data = await resp.json();
         if (data.status === 'ok') {
+            clearAutosave();
             setStatus(`Saved ${data.n_annotations} annotations to ${data.path}`);
             saveBtn.textContent = 'Saved!';
             saveBtn.style.background = '#1b5e20';
@@ -348,7 +662,7 @@ async function exportAnnotations() {
             setTimeout(() => {
                 saveBtn.textContent = 'Save (Ctrl+S)';
                 saveBtn.style.background = '#2e7d32';
-                exportBtn.textContent = 'Export COCO JSON';
+                exportBtn.textContent = 'Export As...';
                 exportBtn.style.background = '#1a8fdd';
             }, 2000);
         } else {
@@ -475,13 +789,15 @@ function drawOverlay() {
     }
 
     // Draw polygon-in-progress
-    if (state.polygonMode && state.polygonPoints.length > 0) {
+    if (state.activeTool === 'polygon' && state.polygonPoints.length > 0) {
         const pts = state.polygonPoints;
         overlayCtx.beginPath();
         overlayCtx.moveTo(pts[0].x, pts[0].y);
         for (let i = 1; i < pts.length; i++) {
             overlayCtx.lineTo(pts[i].x, pts[i].y);
         }
+        // Preview line to cursor
+        overlayCtx.lineTo(state.mouseImageX, state.mouseImageY);
         overlayCtx.strokeStyle = '#ff9800';
         overlayCtx.lineWidth = 2 / state.zoom;
         overlayCtx.setLineDash([5 / state.zoom, 5 / state.zoom]);
@@ -495,6 +811,57 @@ function drawOverlay() {
             overlayCtx.fillStyle = '#ff9800';
             overlayCtx.fill();
         }
+        // Highlight first point (close target)
+        if (pts.length >= 3) {
+            overlayCtx.beginPath();
+            overlayCtx.arc(pts[0].x, pts[0].y, 5 / state.zoom, 0, Math.PI * 2);
+            overlayCtx.strokeStyle = '#ff9800';
+            overlayCtx.lineWidth = 1.5 / state.zoom;
+            overlayCtx.stroke();
+        }
+    }
+
+    // Draw drag shape preview
+    if (state.isDragging) {
+        const sx = state.dragStartX, sy = state.dragStartY;
+        const cx = state.dragCurrentX, cy = state.dragCurrentY;
+        overlayCtx.strokeStyle = '#ff9800';
+        overlayCtx.lineWidth = 2 / state.zoom;
+        overlayCtx.setLineDash([5 / state.zoom, 5 / state.zoom]);
+
+        if (state.activeTool === 'rectangle') {
+            const x = Math.min(sx, cx), y = Math.min(sy, cy);
+            const w = Math.abs(cx - sx), h = Math.abs(cy - sy);
+            overlayCtx.strokeRect(x, y, w, h);
+        } else if (state.activeTool === 'circle') {
+            const mx = (sx + cx) / 2, my = (sy + cy) / 2;
+            const r = Math.sqrt((cx - sx) ** 2 + (cy - sy) ** 2) / 2;
+            overlayCtx.beginPath();
+            overlayCtx.arc(mx, my, r, 0, Math.PI * 2);
+            overlayCtx.stroke();
+        } else if (state.activeTool === 'ellipse') {
+            const mx = (sx + cx) / 2, my = (sy + cy) / 2;
+            const rx = Math.abs(cx - sx) / 2, ry = Math.abs(cy - sy) / 2;
+            overlayCtx.beginPath();
+            overlayCtx.ellipse(mx, my, Math.max(rx, 0.1), Math.max(ry, 0.1), 0, 0, Math.PI * 2);
+            overlayCtx.stroke();
+        }
+        overlayCtx.setLineDash([]);
+    }
+
+    // Draw freeform in-progress
+    if (state.isDrawingFreeform && state.freeformPoints.length > 1) {
+        const pts = state.freeformPoints;
+        overlayCtx.beginPath();
+        overlayCtx.moveTo(pts[0].x, pts[0].y);
+        for (let i = 1; i < pts.length; i++) {
+            overlayCtx.lineTo(pts[i].x, pts[i].y);
+        }
+        overlayCtx.strokeStyle = '#ff9800';
+        overlayCtx.lineWidth = 2 / state.zoom;
+        overlayCtx.setLineDash([4 / state.zoom, 4 / state.zoom]);
+        overlayCtx.stroke();
+        overlayCtx.setLineDash([]);
     }
 
     overlayCtx.restore();
@@ -619,26 +986,62 @@ overlayCanvas.addEventListener('mousedown', (e) => {
     }
 
     if (e.button === 0) {
-        if (state.polygonMode) {
-            // Polygon mode: add vertex
-            if (ix >= 0 && ix < state.imgWidth && iy >= 0 && iy < state.imgHeight) {
+        const tool = state.activeTool;
+        const inBounds = ix >= 0 && ix < state.imgWidth && iy >= 0 && iy < state.imgHeight;
+
+        // Polygon mode: add vertex (or close on first point)
+        if (tool === 'polygon') {
+            if (inBounds) {
+                // Close polygon if clicking near first point
+                if (state.polygonPoints.length >= 3) {
+                    const first = state.polygonPoints[0];
+                    const dist = Math.sqrt((ix - first.x) ** 2 + (iy - first.y) ** 2);
+                    if (dist < 5 / state.zoom) {
+                        // Trigger polygon close by dispatching dblclick logic
+                        overlayCanvas.dispatchEvent(new MouseEvent('dblclick', e));
+                        return;
+                    }
+                }
                 state.polygonPoints.push({x: Math.round(ix), y: Math.round(iy)});
                 drawOverlay();
-                setStatus(`Polygon: ${state.polygonPoints.length} points (double-click to close, Esc to cancel)`);
+                setStatus(`Polygon: ${state.polygonPoints.length} pts (dbl-click or click 1st point to close)`);
             }
             return;
         }
 
-        // Normal mode: check if clicking INSIDE an existing annotation polygon
+        // Freeform mode: start drawing
+        if (tool === 'freeform') {
+            if (inBounds) {
+                state.isDrawingFreeform = true;
+                state.freeformPoints = [{x: Math.round(ix), y: Math.round(iy)}];
+            }
+            return;
+        }
+
+        // Stamp/drag shapes (circle, rectangle, ellipse)
+        const isStampShape = ['circle', 'rectangle', 'ellipse'].includes(tool);
+        if (isStampShape && state.toolMode === 'drag') {
+            // Start drag
+            if (inBounds) {
+                state.isDragging = true;
+                state.dragStartX = ix;
+                state.dragStartY = iy;
+                state.dragCurrentX = ix;
+                state.dragCurrentY = iy;
+            }
+            return;
+        }
+
+        // Default: stamp mode or non-shape tool
+        // Check if clicking INSIDE an existing annotation polygon
         const ann = findAnnotationAtPoint(ix, iy);
         if (ann) {
             state.selectedId = ann.id;
             drawOverlay();
-            setStatus(`Selected #${ann.id} (${getClassName(ann.category_id)}) - press 1/2/3 to reclassify`);
+            setStatus(`Selected #${ann.id} (${getClassName(ann.category_id)}) - press 1-9 to reclassify`);
         } else {
-            // Add new annotation
             state.selectedId = null;
-            if (ix >= 0 && ix < state.imgWidth && iy >= 0 && iy < state.imgHeight) {
+            if (inBounds && isStampShape) {
                 addAnnotation(Math.round(ix), Math.round(iy));
                 setStatus(`Added ${getClassName(state.activeClass)} at (${Math.round(ix)}, ${Math.round(iy)})`);
             }
@@ -656,11 +1059,109 @@ overlayCanvas.addEventListener('mousemove', (e) => {
     }
 
     const [ix, iy] = screenToImage(e.clientX, e.clientY);
+    state.mouseImageX = ix;
+    state.mouseImageY = iy;
     document.getElementById('coords').textContent = `x: ${Math.round(ix)}, y: ${Math.round(iy)} | zoom: ${(state.zoom * 100).toFixed(0)}%`;
+
+    // Drag mode preview
+    if (state.isDragging) {
+        state.dragCurrentX = ix;
+        state.dragCurrentY = iy;
+        drawOverlay();
+        return;
+    }
+
+    // Freeform drawing
+    if (state.isDrawingFreeform && state.freeformPoints.length > 0) {
+        const last = state.freeformPoints[state.freeformPoints.length - 1];
+        const dist = Math.sqrt((ix - last.x) ** 2 + (iy - last.y) ** 2);
+        if (dist >= 2) {
+            state.freeformPoints.push({x: Math.round(ix), y: Math.round(iy)});
+            drawOverlay();
+        }
+        return;
+    }
+
+    // Polygon preview line (redraw to show line from last point to cursor)
+    if (state.activeTool === 'polygon' && state.polygonPoints.length > 0) {
+        drawOverlay();
+    }
 });
 
-overlayCanvas.addEventListener('mouseup', () => {
-    state.isPanning = false;
+overlayCanvas.addEventListener('mouseup', async (e) => {
+    if (state.isPanning) {
+        state.isPanning = false;
+        overlayCanvas.style.cursor = 'crosshair';
+        return;
+    }
+
+    // Finish drag shape
+    if (state.isDragging) {
+        state.isDragging = false;
+        const sx = state.dragStartX, sy = state.dragStartY;
+        const ex = state.dragCurrentX, ey = state.dragCurrentY;
+        const cx = (sx + ex) / 2, cy = (sy + ey) / 2;
+        const tool = state.activeTool;
+
+        // Minimum drag distance check
+        const dragDist = Math.sqrt((ex - sx) ** 2 + (ey - sy) ** 2);
+        if (dragDist < 2) { drawOverlay(); return; }
+
+        // Temporarily override stamp params with drag dimensions
+        const savedParams = {...state.stampParams[tool]};
+        if (tool === 'circle') {
+            state.stampParams.circle = { radius: dragDist / 2 };
+        } else if (tool === 'rectangle') {
+            state.stampParams.rectangle = { width: Math.abs(ex - sx), height: Math.abs(ey - sy) };
+        } else if (tool === 'ellipse') {
+            state.stampParams.ellipse = { rx: Math.abs(ex - sx) / 2, ry: Math.abs(ey - sy) / 2 };
+        }
+
+        await addAnnotation(Math.round(cx), Math.round(cy));
+        state.stampParams[tool] = savedParams;
+        setStatus(`Added ${tool} via drag at (${Math.round(cx)}, ${Math.round(cy)})`);
+        drawOverlay();
+        return;
+    }
+
+    // Finish freeform shape
+    if (state.isDrawingFreeform && state.freeformPoints.length >= 3) {
+        state.isDrawingFreeform = false;
+        // Simplify: keep every Nth point to cap at ~50
+        let pts = state.freeformPoints;
+        const step = Math.max(1, Math.floor(pts.length / 50));
+        const simplified = pts.filter((_, i) => i % step === 0);
+        const flatPoly = [];
+        simplified.forEach(p => flatPoly.push(p.x, p.y));
+
+        try {
+            const resp = await fetch('/api/add_polygon', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    well: state.well,
+                    timepoint: state.timepoint,
+                    polygon: flatPoly,
+                    class_id: state.activeClass
+                })
+            });
+            const data = await resp.json();
+            if (data.status === 'ok') {
+                state.undoStack.push({action: 'add', annotation: data.annotation});
+                state.annotations.push(data.annotation);
+                setStatus(`Added freeform shape (${simplified.length} vertices)`);
+                markUnsaved();
+            }
+        } catch (err) {
+            setStatus(`Error: ${err.message}`);
+        }
+        state.freeformPoints = [];
+        drawOverlay();
+        updateStats();
+        return;
+    }
+    state.isDrawingFreeform = false;
+    state.freeformPoints = [];
     overlayCanvas.style.cursor = 'crosshair';
 });
 
@@ -714,6 +1215,7 @@ overlayCanvas.addEventListener('dblclick', async (e) => {
             state.undoStack.push({action: 'add', annotation: data.annotation});
             state.annotations.push(data.annotation);
             setStatus(`Added polygon ${getClassName(state.activeClass)} (${state.polygonPoints.length} vertices)`);
+            markUnsaved();
         }
     } catch (err) {
         setStatus(`Error: ${err.message}`);
@@ -726,6 +1228,9 @@ overlayCanvas.addEventListener('dblclick', async (e) => {
 
 // Keyboard
 document.addEventListener('keydown', (e) => {
+    // Ignore shortcuts when typing in inputs
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA') return;
+
     if (e.key === ' ') {
         e.preventDefault();
         state.spaceHeld = true;
@@ -735,7 +1240,7 @@ document.addEventListener('keydown', (e) => {
     const numKey = parseInt(e.key);
     if (numKey >= 1 && numKey <= 9) {
         const sortedIds = Object.keys(classConfig).map(Number).sort((a, b) => a - b);
-        const idx = numKey - 1;  // key "1" -> index 0, key "2" -> index 1, etc.
+        const idx = numKey - 1;
         if (idx < sortedIds.length) {
             const classId = sortedIds[idx];
             if (state.selectedId !== null) {
@@ -756,29 +1261,20 @@ document.addEventListener('keydown', (e) => {
     } else if (e.key === 'z' || e.key === 'Z') {
         undoLastAction();
     }
-    if (e.key === 'f' || e.key === 'F') {
-        fitToScreen();
-        drawBg();
-        drawOverlay();
-    }
+    if (e.key === 'f' || e.key === 'F') { fitToScreen(); drawBg(); drawOverlay(); }
     if (e.key === 'g' || e.key === 'G') {
         state.showGrid = !state.showGrid;
         drawOverlay();
         setStatus(`Grid: ${state.showGrid ? 'ON' : 'OFF'}`);
     }
-    if (e.key === 'p' || e.key === 'P') {
-        state.polygonMode = !state.polygonMode;
-        state.polygonPoints = [];
-        const indicator = document.getElementById('mode-indicator');
-        if (state.polygonMode) {
-            indicator.classList.add('polygon-mode');
-            overlayCanvas.style.cursor = 'crosshair';
-        } else {
-            indicator.classList.remove('polygon-mode');
-        }
-        drawOverlay();
-        setStatus(`Polygon mode: ${state.polygonMode ? 'ON (click to add points, double-click to close)' : 'OFF'}`);
-    }
+    // Tool shortcuts
+    if (e.key === 'c' || e.key === 'C') { setActiveTool('circle'); setStatus('Tool: Circle'); }
+    if (e.key === 'r' || e.key === 'R') { setActiveTool('rectangle'); setStatus('Tool: Rectangle'); }
+    if (e.key === 'e' || e.key === 'E') { setActiveTool('ellipse'); setStatus('Tool: Ellipse'); }
+    if (e.key === 'p' || e.key === 'P') { setActiveTool('polygon'); setStatus('Tool: Polygon'); }
+    if (e.key === 'l' || e.key === 'L') { setActiveTool('freeform'); setStatus('Tool: Freeform Lasso'); }
+    if (e.key === 'd' || e.key === 'D') { toggleToolMode(); setStatus(`Mode: ${state.toolMode}`); }
+
     if (e.key === 'Escape') {
         if (state.polygonMode && state.polygonPoints.length > 0) {
             state.polygonPoints = [];
@@ -786,12 +1282,25 @@ document.addEventListener('keydown', (e) => {
             setStatus('Polygon cancelled');
             return;
         }
+        if (state.isDrawingFreeform) {
+            state.isDrawingFreeform = false;
+            state.freeformPoints = [];
+            drawOverlay();
+            setStatus('Freeform cancelled');
+            return;
+        }
+        if (state.isDragging) {
+            state.isDragging = false;
+            drawOverlay();
+            setStatus('Drag cancelled');
+            return;
+        }
         state.selectedId = null;
         drawOverlay();
     }
     if ((e.key === 's' || e.key === 'S') && (e.ctrlKey || e.metaKey)) {
         e.preventDefault();
-        exportAnnotations();
+        exportAnnotations('coco');
     }
 });
 
@@ -1123,8 +1632,44 @@ document.getElementById('opacity-slider').addEventListener('input', (e) => {
 
 // Buttons
 document.getElementById('load-btn').addEventListener('click', loadFrame);
-document.getElementById('save-btn').addEventListener('click', exportAnnotations);
-document.getElementById('export-btn').addEventListener('click', exportAnnotations);
+document.getElementById('save-btn').addEventListener('click', () => exportAnnotations('coco'));
+
+// Export dropdown toggle + format selection
+const exportBtn = document.getElementById('export-btn');
+const exportMenu = document.getElementById('export-menu');
+exportBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    exportMenu.style.display = exportMenu.style.display === 'none' ? 'block' : 'none';
+});
+exportMenu.querySelectorAll('.context-menu-item').forEach(item => {
+    item.addEventListener('click', (e) => {
+        e.stopPropagation();
+        exportMenu.style.display = 'none';
+        exportAnnotations(item.dataset.format);
+    });
+});
+document.addEventListener('click', () => { exportMenu.style.display = 'none'; });
+
+// Toolbar: shape tool buttons
+document.querySelectorAll('.tool-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+        setActiveTool(btn.dataset.tool);
+        setStatus(`Tool: ${btn.dataset.tool}`);
+    });
+});
+document.getElementById('mode-toggle-btn').addEventListener('click', () => {
+    toggleToolMode();
+    setStatus(`Mode: ${state.toolMode}`);
+});
+
+// Shape preset save button
+document.getElementById('save-preset-btn').addEventListener('click', savePreset);
+
+// Stamp param inputs: sync on change
+['stamp-radius', 'stamp-width', 'stamp-height', 'stamp-rx', 'stamp-ry'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('input', syncStampParams);
+});
 
 // Window resize
 window.addEventListener('resize', () => {
@@ -1200,6 +1745,23 @@ async function loadSemiFrames() {
 }
 
 document.getElementById('scan-folder-btn').addEventListener('click', scanFolder);
+
+// Browse folder: open native OS file explorer, then auto-scan
+document.getElementById('browse-folder-btn').addEventListener('click', async () => {
+    setStatus('Opening folder picker...');
+    try {
+        const resp = await fetch('/api/browse_folder');
+        const data = await resp.json();
+        if (data.status === 'ok' && data.path) {
+            document.getElementById('folder-input').value = data.path;
+            scanFolder();
+        } else {
+            setStatus('Folder selection cancelled');
+        }
+    } catch (e) {
+        setStatus(`Error: ${e.message}`);
+    }
+});
 // Also scan on Enter key in folder input
 document.getElementById('folder-input').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') scanFolder();
@@ -1231,11 +1793,13 @@ async function loadSemiFrame() {
             const data = await resp.json();
             state.annotations = data.annotations || [];
             state.undoStack = [];
+            updateSaveIndicator('saved');
             // Re-fetch labels in case importing created new classes
             await fetchLabels();
             drawOverlay();
             updateStats();
             setStatus(`Loaded: ${state.annotations.length} pre-annotations`);
+            await checkAutosaveRecovery();
         } catch (e) {
             setStatus(`Error: ${e.message}`);
         }
