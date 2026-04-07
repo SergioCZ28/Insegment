@@ -7,12 +7,14 @@ This module defines the Flask web application. It is started by the CLI
 import io
 import json
 import math
+import queue
+import threading
 import time
+import uuid
 from pathlib import Path
 
 import numpy as np
-import tifffile
-from flask import Flask, jsonify, render_template, request, send_file
+from flask import Flask, Response, jsonify, render_template, request, send_file
 from PIL import Image
 
 from insegment.models.base import SegmentationResult
@@ -38,24 +40,29 @@ DEFAULT_COLORS = [
     "#795548",  # brown
 ]
 
+# Supported image extensions (case-insensitive).
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"}
+
 # Global state -- shared across requests (single-process server).
 # In production you'd use a database, but for a local annotation tool this is fine.
 STATE = {
     "segmenter": None,           # Model instance (BaseSegmenter subclass) or None
-    "tiff_dir": None,            # Path to directory with transformed TIFFs
+    "image_dir": None,           # Path to directory with images
+    "images": [],                # [{path: str, filename: str}, ...] sorted
     "output_dir": None,          # Path for exported annotation files
-    "cache": {},                 # (well, tp) -> detection data
-    "edits": {},                 # (well, tp) -> list of edits applied
-    "annotations": {},           # (well, tp) -> current annotation state
+    "annotations": {},           # int index -> annotation data for that image
     "cell_radius": 4,            # default radius for manually added cells (pixels)
     "class_names": {0: "single-cell", 1: "clump", 2: "debris"},  # default labels
     "class_colors": {0: "#4caf50", 1: "#f44336", 2: "#ffeb3b"},  # default colors
 }
 
+# Inference job tracking for SSE progress
+_inference_jobs = {}
+
 
 def configure_app(
     segmenter=None,
-    tiff_dir=None,
+    image_dir=None,
     output_dir=None,
     cell_radius=4,
     semiannotation_dir=None,
@@ -64,13 +71,13 @@ def configure_app(
 
     Args:
         segmenter: An instance of BaseSegmenter (or None for annotation-only mode).
-        tiff_dir: Path to folder containing *_transformed.tiff files.
+        image_dir: Path to folder containing image files (PNG, JPEG, TIFF, etc.).
         output_dir: Path where exported annotations are saved.
         cell_radius: Radius in pixels for manually added circle annotations.
         semiannotation_dir: Path to folder with PNGs + _annotations.coco.json.
     """
     STATE["segmenter"] = segmenter
-    STATE["tiff_dir"] = tiff_dir
+    STATE["image_dir"] = image_dir
     STATE["output_dir"] = output_dir or "./annotations_output"
     STATE["cell_radius"] = cell_radius
 
@@ -84,9 +91,38 @@ def configure_app(
         for idx in STATE["class_names"]
     }
 
+    # Scan image directory if provided
+    if image_dir:
+        _scan_image_dir(image_dir)
+
     # Load semi-annotation directory if provided
     if semiannotation_dir:
         _load_semiannotation_dir(semiannotation_dir)
+
+
+def _scan_image_dir(directory):
+    """Scan a directory for image files and populate STATE['images']."""
+    directory = Path(directory)
+    if not directory.exists():
+        print(f"WARNING: Image directory not found: {directory}")
+        return
+
+    images = []
+    for f in sorted(directory.iterdir()):
+        if f.is_file() and f.suffix.lower() in IMAGE_EXTENSIONS:
+            images.append({
+                "path": str(f.resolve()),
+                "filename": f.stem,
+            })
+
+    STATE["images"] = images
+    STATE["image_dir"] = str(directory)
+    # Clear annotations cache when switching directories
+    STATE["annotations"] = {
+        k: v for k, v in STATE["annotations"].items()
+        if not isinstance(k, int)
+    }
+    print(f"Loaded {len(images)} images from {directory}")
 
 
 def _load_semiannotation_dir(semi_dir):
@@ -121,36 +157,23 @@ def _load_semiannotation_dir(semi_dir):
 # Helper functions
 # ---------------------------------------------------------------------------
 
-def list_tiff_files():
-    """List available wells from transformed TIFFs."""
-    tiff_dir = STATE.get("tiff_dir")
-    if not tiff_dir:
-        return {}
-    tiff_dir = Path(tiff_dir)
-    if not tiff_dir.exists():
-        return {}
+def load_image(index):
+    """Load an image by index from STATE['images'].
 
-    wells = {}
-    for f in sorted(tiff_dir.glob("*_transformed.tiff")):
-        parts = f.stem.replace("_transformed", "").split("_")
-        for i, part in enumerate(parts):
-            if part.startswith("p") and part[1:].isdigit():
-                well = parts[i - 1]
-                break
-        else:
-            continue
-
-        with tifffile.TiffFile(str(f)) as tif:
-            n_pages = len(tif.pages)
-            n_timepoints = n_pages // 2  # BF + FL alternating
-
-        wells[well] = {
-            "file": str(f),
-            "well": well,
-            "n_timepoints": n_timepoints,
-            "filename": f.name,
-        }
-    return wells
+    Opens the image with PIL (handles PNG, JPEG, TIFF, BMP, WebP, etc.)
+    and returns a numpy array (uint8, grayscale or RGB).
+    """
+    if index < 0 or index >= len(STATE["images"]):
+        return None
+    path = STATE["images"][index]["path"]
+    img = Image.open(path)
+    frame = np.array(img)
+    # Normalize to uint8 if needed (e.g. 16-bit TIFF)
+    if frame.dtype != np.uint8:
+        frame_f = frame.astype(np.float32)
+        frame_f = (frame_f - frame_f.min()) / (frame_f.max() - frame_f.min() + 1e-6) * 255
+        frame = frame_f.astype(np.uint8)
+    return frame
 
 
 def build_category_map(coco_categories):
@@ -159,9 +182,6 @@ def build_category_map(coco_categories):
     If a COCO category name already exists in our class_names, map to that ID.
     If it's a new name we haven't seen, auto-create a new class for it
     (with the next available ID and an auto-assigned color).
-
-    This way, importing a COCO file with categories like "leaf", "stem", "root"
-    automatically creates those classes in the UI.
 
     Args:
         coco_categories: list of dicts from COCO JSON, e.g.
@@ -191,20 +211,6 @@ def build_category_map(coco_categories):
             print(f"  Auto-created class: {name} (id={next_id})")
 
     return cat_map
-
-
-def load_frame(well, timepoint):
-    """Load BF channel from TIFF."""
-    wells = list_tiff_files()
-    if well not in wells:
-        return None
-    tiff_path = wells[well]["file"]
-    bf_index = timepoint * 2
-    with tifffile.TiffFile(tiff_path) as tif:
-        if bf_index >= len(tif.pages):
-            return None
-        frame = tif.pages[bf_index].asarray()
-    return frame
 
 
 def mask_to_polygon(binary_mask):
@@ -285,28 +291,32 @@ def polygon_bbox_area(flat_polygon):
     return bbox, round(area, 1)
 
 
-def run_inference(well, timepoint):
-    """Run model inference and cache results."""
-    cache_key = (well, timepoint)
-    if cache_key in STATE["annotations"]:
-        return STATE["annotations"][cache_key]
+def run_inference(index):
+    """Run model inference on image at index and cache results."""
+    if index in STATE["annotations"]:
+        return STATE["annotations"][index]
 
-    frame = load_frame(well, timepoint)
+    frame = load_image(index)
     if frame is None:
         return None
+
+    filename = STATE["images"][index]["filename"]
 
     segmenter = STATE.get("segmenter")
     if segmenter is None:
         # No model loaded -- return empty annotations (annotation-only mode)
-        return {
-            "well": well,
-            "timepoint": timepoint,
-            "width": int(frame.shape[1]),
-            "height": int(frame.shape[0]),
+        h, w = frame.shape[:2]
+        result = {
+            "index": index,
+            "filename": filename,
+            "width": w,
+            "height": h,
             "annotations": [],
             "inference_time": 0,
             "next_id": 0,
         }
+        STATE["annotations"][index] = result
+        return result
 
     t0 = time.time()
     result = segmenter.predict(frame)
@@ -347,17 +357,18 @@ def run_inference(well, timepoint):
             "source": "model",
         })
 
+    h, w = frame.shape[:2]
     ann_result = {
-        "well": well,
-        "timepoint": timepoint,
-        "width": int(frame.shape[1]),
-        "height": int(frame.shape[0]),
+        "index": index,
+        "filename": filename,
+        "width": w,
+        "height": h,
         "annotations": annotations,
         "inference_time": round(elapsed, 1),
         "next_id": n_detections,
     }
 
-    STATE["annotations"][cache_key] = ann_result
+    STATE["annotations"][index] = ann_result
     return ann_result
 
 
@@ -403,12 +414,7 @@ def api_labels():
 
 @app.route("/api/labels/rename", methods=["POST"])
 def api_labels_rename():
-    """Rename a label class. This is a 'bulk rename' -- it updates the class
-    name everywhere, including all cached annotations' display names.
-
-    The actual annotation data uses integer IDs (category_id), not names,
-    so renaming doesn't change any annotation data. It only changes
-    what name is displayed in the UI and exported in COCO JSON.
+    """Rename a label class.
 
     Body: {"id": 0, "new_name": "single-cell"}
     """
@@ -443,10 +449,7 @@ def api_labels_add():
     if not name:
         return jsonify({"error": "Name is required"}), 400
 
-    # Find the next available ID (one higher than the current max)
     next_id = max(STATE["class_names"].keys()) + 1 if STATE["class_names"] else 0
-
-    # Assign color: use provided color, or auto-pick from palette
     color = data.get("color") or DEFAULT_COLORS[next_id % len(DEFAULT_COLORS)]
 
     STATE["class_names"][next_id] = name
@@ -465,11 +468,6 @@ def api_labels_remove():
     """Remove a label class.
 
     Body: {"id": 3}
-
-    WARNING: This does NOT delete annotations that use this class.
-    Those annotations will still exist with the old category_id,
-    but they won't match any class name anymore. The frontend
-    should warn the user about this.
     """
     data = request.json
     class_id = data["id"]
@@ -480,12 +478,12 @@ def api_labels_remove():
     if len(STATE["class_names"]) <= 1:
         return jsonify({"error": "Cannot remove the last class"}), 400
 
-    # Count how many annotations use this class (across all frames)
     n_affected = 0
     for ann_data in STATE["annotations"].values():
-        n_affected += sum(
-            1 for a in ann_data["annotations"] if a["category_id"] == class_id
-        )
+        if isinstance(ann_data, dict) and "annotations" in ann_data:
+            n_affected += sum(
+                1 for a in ann_data["annotations"] if a["category_id"] == class_id
+            )
 
     removed_name = STATE["class_names"].pop(class_id)
     STATE["class_colors"].pop(class_id, None)
@@ -515,22 +513,100 @@ def api_labels_color():
     return jsonify({"status": "ok", "id": class_id, "color": color})
 
 
-@app.route("/api/frames")
-def api_frames():
-    """List available wells and timepoints."""
-    wells = list_tiff_files()
+# ---------------------------------------------------------------------------
+# Image listing and navigation API
+# ---------------------------------------------------------------------------
+
+@app.route("/api/images")
+def api_images():
+    """List available images."""
+    images = [
+        {"index": i, "filename": img["filename"]}
+        for i, img in enumerate(STATE["images"])
+    ]
     result = {
-        well: {"n_timepoints": info["n_timepoints"], "filename": info["filename"]}
-        for well, info in wells.items()
+        "images": images,
+        "count": len(images),
+        "has_model": STATE["segmenter"] is not None,
     }
     if STATE.get("semiannotation_dir"):
-        result["__semiannotation__"] = {
-            "n_timepoints": 0,
-            "filename": "Pre-annotated frames",
+        result["semiannotation"] = {
+            "dir": STATE.get("semiannotation_dir", ""),
             "frames": list(STATE.get("semiannotation_frames", {}).keys()),
         }
     return jsonify(result)
 
+
+@app.route("/api/image/<int:index>")
+def api_image(index):
+    """Serve an image as PNG by index."""
+    frame = load_image(index)
+    if frame is None:
+        return jsonify({"error": "Image not found"}), 404
+
+    # Convert to 8-bit for display (already uint8 from load_image)
+    if frame.ndim == 2:
+        img = Image.fromarray(frame, mode="L")
+    else:
+        img = Image.fromarray(frame)
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    return send_file(buf, mimetype="image/png")
+
+
+@app.route("/api/detections/<int:index>")
+def api_detections(index):
+    """Run inference and return detections."""
+    result = run_inference(index)
+    if result is None:
+        return jsonify({"error": "Could not process image"}), 404
+    return jsonify(result)
+
+
+@app.route("/api/browse")
+def api_browse():
+    """Open native OS folder picker, scan for images, return list."""
+    import threading as _threading
+
+    result = {"path": None}
+
+    def pick():
+        try:
+            import tkinter as tk
+            from tkinter import filedialog
+            root = tk.Tk()
+            root.withdraw()
+            root.attributes("-topmost", True)
+            path = filedialog.askdirectory(title="Select image folder")
+            root.destroy()
+            result["path"] = path if path else None
+        except Exception:
+            result["path"] = None
+
+    t = _threading.Thread(target=pick)
+    t.start()
+    t.join(timeout=120)
+
+    if result["path"]:
+        _scan_image_dir(result["path"])
+        images = [
+            {"index": i, "filename": img["filename"]}
+            for i, img in enumerate(STATE["images"])
+        ]
+        return jsonify({
+            "status": "ok",
+            "path": result["path"],
+            "images": images,
+            "count": len(images),
+        })
+    return jsonify({"status": "cancelled"})
+
+
+# ---------------------------------------------------------------------------
+# Semi-annotation routes (kept for backward compat)
+# ---------------------------------------------------------------------------
 
 @app.route("/api/semiannotation/list")
 def api_semiannotation_list():
@@ -541,8 +617,8 @@ def api_semiannotation_list():
 
 @app.route("/api/browse_folder")
 def api_browse_folder():
-    """Open native OS folder picker and return the selected path."""
-    import threading
+    """Open native OS folder picker (for semi-annotation scan)."""
+    import threading as _threading
 
     result = {"path": None}
 
@@ -559,8 +635,7 @@ def api_browse_folder():
         except Exception:
             result["path"] = None
 
-    # tkinter must run in a thread to avoid blocking Flask
-    t = threading.Thread(target=pick)
+    t = _threading.Thread(target=pick)
     t.start()
     t.join(timeout=120)
 
@@ -614,7 +689,7 @@ def api_semiannotation_scan():
 
     STATE["semiannotation_dir"] = str(folder_path)
     STATE["semiannotation_frames"] = frames
-    semi_keys = [k for k in STATE["annotations"] if k[0] == "semi"]
+    semi_keys = [k for k in STATE["annotations"] if isinstance(k, tuple) and k[0] == "semi"]
     for k in semi_keys:
         del STATE["annotations"][k]
 
@@ -796,31 +871,9 @@ def api_semiannotation_infer(frame_key):
     return jsonify(ann_result)
 
 
-@app.route("/api/frame/<well>/<int:timepoint>")
-def api_frame(well, timepoint):
-    """Serve BF frame as PNG."""
-    frame = load_frame(well, timepoint)
-    if frame is None:
-        return jsonify({"error": "Frame not found"}), 404
-
-    frame_f = frame.astype(np.float32)
-    frame_f = (frame_f - frame_f.min()) / (frame_f.max() - frame_f.min() + 1e-6) * 255
-    img = Image.fromarray(frame_f.astype(np.uint8))
-
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    buf.seek(0)
-    return send_file(buf, mimetype="image/png")
-
-
-@app.route("/api/detections/<well>/<int:timepoint>")
-def api_detections(well, timepoint):
-    """Run inference and return detections."""
-    result = run_inference(well, timepoint)
-    if result is None:
-        return jsonify({"error": "Could not process frame"}), 404
-    return jsonify(result)
-
+# ---------------------------------------------------------------------------
+# Annotation editing API (index-based)
+# ---------------------------------------------------------------------------
 
 @app.route("/api/add", methods=["POST"])
 def api_add():
@@ -828,26 +881,19 @@ def api_add():
 
     Accepts optional 'shape' and 'params' fields for different shape types.
     Defaults to circle with STATE["cell_radius"] when not specified.
-
-    Shapes:
-        circle:    params = {radius}
-        rectangle: params = {width, height}
-        ellipse:   params = {rx, ry}
     """
     data = request.json
-    well = data["well"]
-    timepoint = data["timepoint"]
+    index = data["index"]
     x = data["x"]
     y = data["y"]
     class_id = data.get("class_id", 0)
     shape = data.get("shape", "circle")
     params = data.get("params", {})
 
-    cache_key = (well, timepoint)
-    if cache_key not in STATE["annotations"]:
-        return jsonify({"error": "No annotations loaded for this frame"}), 400
+    if index not in STATE["annotations"]:
+        return jsonify({"error": "No annotations loaded for this image"}), 400
 
-    ann_data = STATE["annotations"][cache_key]
+    ann_data = STATE["annotations"][index]
     next_id = ann_data["next_id"]
 
     if shape == "rectangle":
@@ -884,16 +930,14 @@ def api_add():
 def api_add_polygon():
     """Add a new annotation with a custom polygon shape."""
     data = request.json
-    well = data["well"]
-    timepoint = data["timepoint"]
+    index = data["index"]
     polygon = data["polygon"]
     class_id = data.get("class_id", 1)
 
-    cache_key = (well, timepoint)
-    if cache_key not in STATE["annotations"]:
-        return jsonify({"error": "No annotations loaded for this frame"}), 400
+    if index not in STATE["annotations"]:
+        return jsonify({"error": "No annotations loaded for this image"}), 400
 
-    ann_data = STATE["annotations"][cache_key]
+    ann_data = STATE["annotations"][index]
     next_id = ann_data["next_id"]
 
     bbox, area = polygon_bbox_area(polygon)
@@ -914,39 +958,29 @@ def api_add_polygon():
     return jsonify({"status": "ok", "annotation": new_ann})
 
 
-@app.route("/api/remove/<well>/<timepoint>/<int:ann_id>", methods=["POST"])
-def api_remove(well, timepoint, ann_id):
+@app.route("/api/remove/<int:index>/<int:ann_id>", methods=["POST"])
+def api_remove(index, ann_id):
     """Remove an annotation by ID."""
-    try:
-        timepoint = int(timepoint)
-    except ValueError:
-        pass
-    cache_key = (well, timepoint)
-    if cache_key not in STATE["annotations"]:
+    if index not in STATE["annotations"]:
         return jsonify({"error": "No annotations loaded"}), 400
 
-    ann_data = STATE["annotations"][cache_key]
+    ann_data = STATE["annotations"][index]
     ann_data["annotations"] = [
         a for a in ann_data["annotations"] if a["id"] != ann_id
     ]
     return jsonify({"status": "ok"})
 
 
-@app.route("/api/reclassify/<well>/<timepoint>/<int:ann_id>", methods=["POST"])
-def api_reclassify(well, timepoint, ann_id):
+@app.route("/api/reclassify/<int:index>/<int:ann_id>", methods=["POST"])
+def api_reclassify(index, ann_id):
     """Change class of an annotation."""
     data = request.json
     new_class = data["class_id"]
 
-    try:
-        timepoint = int(timepoint)
-    except ValueError:
-        pass
-    cache_key = (well, timepoint)
-    if cache_key not in STATE["annotations"]:
+    if index not in STATE["annotations"]:
         return jsonify({"error": "No annotations loaded"}), 400
 
-    ann_data = STATE["annotations"][cache_key]
+    ann_data = STATE["annotations"][index]
     for ann in ann_data["annotations"]:
         if ann["id"] == ann_id:
             ann["category_id"] = new_class
@@ -955,34 +989,33 @@ def api_reclassify(well, timepoint, ann_id):
     return jsonify({"error": "Annotation not found"}), 404
 
 
-def _build_coco_dict(ann_data, class_names, file_name):
-    """Build a COCO-format dict from annotation data.
+# ---------------------------------------------------------------------------
+# Export and autosave (index-based)
+# ---------------------------------------------------------------------------
 
-    Delegates to the canonical exporter to avoid duplication.
-    Used by autosave (which always writes COCO format).
-    """
+def _build_coco_dict(ann_data, class_names, file_name):
+    """Build a COCO-format dict from annotation data."""
     from insegment.exporters import export_coco
     return export_coco(ann_data, class_names, file_name)
 
 
-def _resolve_cache_key(well, timepoint):
-    """Parse well/timepoint into a (cache_key, file_label) tuple."""
-    try:
-        tp = int(timepoint)
-        return (well, tp), f"{well}_t{tp:02d}"
-    except ValueError:
-        return (well, timepoint), timepoint
+def _get_file_label(index):
+    """Get file label for export/autosave filenames."""
+    if index < 0 or index >= len(STATE["images"]):
+        return f"image_{index}"
+    return STATE["images"][index]["filename"]
 
 
-def _get_file_name(well, timepoint, file_label):
-    """Get the image file name for export/autosave."""
-    if well == "semi" and timepoint in STATE.get("semiannotation_frames", {}):
-        return STATE["semiannotation_frames"][timepoint]["filename"]
-    return f"{file_label}.png"
+def _get_file_name(index):
+    """Get the original image filename for export metadata."""
+    if index < 0 or index >= len(STATE["images"]):
+        return f"image_{index}.png"
+    path = Path(STATE["images"][index]["path"])
+    return path.name
 
 
-@app.route("/api/export/<well>/<timepoint>")
-def api_export(well, timepoint):
+@app.route("/api/export/<int:index>")
+def api_export(index):
     """Export annotations in the requested format (default: coco).
 
     Query params:
@@ -990,14 +1023,13 @@ def api_export(well, timepoint):
     """
     from insegment.exporters import export_coco, export_yolo, export_csv, export_voc
 
-    cache_key, file_label = _resolve_cache_key(well, timepoint)
-
-    if cache_key not in STATE["annotations"]:
+    if index not in STATE["annotations"]:
         return jsonify({"error": "No annotations to export"}), 400
 
-    ann_data = STATE["annotations"][cache_key]
+    ann_data = STATE["annotations"][index]
     class_names = STATE["class_names"]
-    file_name = _get_file_name(well, timepoint, file_label)
+    file_label = _get_file_label(index)
+    file_name = _get_file_name(index)
     fmt = request.args.get("format", "coco")
 
     out_dir = Path(STATE["output_dir"])
@@ -1038,15 +1070,14 @@ def api_export(well, timepoint):
 def api_autosave():
     """Auto-save annotations to a recovery file."""
     data = request.get_json()
-    well = data.get("well")
-    timepoint = data.get("timepoint")
-    cache_key, file_label = _resolve_cache_key(well, timepoint)
+    index = data.get("index")
 
-    if cache_key not in STATE["annotations"]:
+    if index not in STATE["annotations"]:
         return jsonify({"error": "No annotations loaded"}), 400
 
-    ann_data = STATE["annotations"][cache_key]
-    file_name = _get_file_name(well, timepoint, file_label)
+    ann_data = STATE["annotations"][index]
+    file_label = _get_file_label(index)
+    file_name = _get_file_name(index)
     coco = _build_coco_dict(ann_data, STATE["class_names"], file_name)
 
     out_dir = Path(STATE["output_dir"])
@@ -1058,10 +1089,10 @@ def api_autosave():
     return jsonify({"status": "ok", "path": str(out_path)})
 
 
-@app.route("/api/autosave/<well>/<timepoint>")
-def api_get_autosave(well, timepoint):
+@app.route("/api/autosave/<int:index>")
+def api_get_autosave(index):
     """Check if an autosave exists and return its annotations."""
-    _cache_key, file_label = _resolve_cache_key(well, timepoint)
+    file_label = _get_file_label(index)
     out_dir = Path(STATE["output_dir"])
     autosave_path = out_dir / f"{file_label}_autosave.json"
 
@@ -1096,36 +1127,56 @@ def api_get_autosave(well, timepoint):
 def api_restore():
     """Bulk-load annotations (for autosave recovery)."""
     data = request.get_json()
-    well = data.get("well")
-    timepoint = data.get("timepoint")
+    index = data.get("index")
     annotations = data.get("annotations", [])
-    cache_key, _file_label = _resolve_cache_key(well, timepoint)
 
-    if cache_key not in STATE["annotations"]:
-        return jsonify({"error": "Frame not loaded"}), 400
+    if index not in STATE["annotations"]:
+        return jsonify({"error": "Image not loaded"}), 400
 
-    ann_data = STATE["annotations"][cache_key]
+    ann_data = STATE["annotations"][index]
     ann_data["annotations"] = annotations
-    # Update next_id to be above the max existing ID
     max_id = max((a["id"] for a in annotations), default=-1)
     ann_data["next_id"] = max_id + 1
 
     return jsonify({"status": "ok", "n_annotations": len(annotations)})
 
 
-@app.route("/api/tile_info/<well>/<timepoint>")
-def api_tile_info(well, timepoint):
-    """Return tile grid info for a loaded frame."""
-    try:
-        tp = int(timepoint)
-        cache_key = (well, tp)
-    except ValueError:
-        cache_key = (well, timepoint)
+# ---------------------------------------------------------------------------
+# Stats API
+# ---------------------------------------------------------------------------
 
-    if cache_key not in STATE["annotations"]:
-        return jsonify({"error": "Frame not loaded"}), 400
+@app.route("/api/stats/<int:index>")
+def api_stats(index):
+    """Get annotation statistics."""
+    if index not in STATE["annotations"]:
+        return jsonify({"error": "No annotations loaded"}), 400
 
-    ann_data = STATE["annotations"][cache_key]
+    ann_data = STATE["annotations"][index]
+    anns = ann_data["annotations"]
+    class_names = STATE["class_names"]
+
+    stats = {
+        "total": len(anns),
+        "model": sum(1 for a in anns if a.get("source") == "model"),
+        "manual": sum(1 for a in anns if a.get("source") == "manual"),
+    }
+    for idx, name in class_names.items():
+        stats[name] = sum(1 for a in anns if a["category_id"] == idx)
+
+    return jsonify(stats)
+
+
+# ---------------------------------------------------------------------------
+# Tile API (index-based)
+# ---------------------------------------------------------------------------
+
+@app.route("/api/tile_info/<int:index>")
+def api_tile_info(index):
+    """Return tile grid info for a loaded image."""
+    if index not in STATE["annotations"]:
+        return jsonify({"error": "Image not loaded"}), 400
+
+    ann_data = STATE["annotations"][index]
     tile_size = 432
     n_rows = math.ceil(ann_data["height"] / tile_size)
     n_cols = math.ceil(ann_data["width"] / tile_size)
@@ -1161,30 +1212,20 @@ def api_tile_info(well, timepoint):
     })
 
 
-@app.route("/api/tile/<well>/<timepoint>/<int:row>/<int:col>")
-def api_tile(well, timepoint, row, col):
+@app.route("/api/tile/<int:index>/<int:row>/<int:col>")
+def api_tile(index, row, col):
     """Serve a single tile with coordinate grid overlay and annotations."""
     import cv2
 
     tile_size = 432
 
-    try:
-        tp = int(timepoint)
-        cache_key = (well, tp)
-    except ValueError:
-        cache_key = (well, timepoint)
-        tp = timepoint
+    frame = load_image(index)
+    if frame is None:
+        return jsonify({"error": "Image not found"}), 404
 
-    if well == "semi":
-        frames = STATE.get("semiannotation_frames", {})
-        if tp not in frames:
-            return jsonify({"error": "Frame not found"}), 404
-        img_pil = Image.open(frames[tp]["path"]).convert("L")
-        frame = np.array(img_pil)
-    else:
-        frame = load_frame(well, int(tp))
-        if frame is None:
-            return jsonify({"error": "Frame not found"}), 404
+    # Ensure grayscale for tile rendering
+    if frame.ndim == 3:
+        frame = np.mean(frame, axis=2).astype(np.uint8)
 
     h, w = frame.shape[:2]
     x0 = col * tile_size
@@ -1226,8 +1267,8 @@ def api_tile(well, timepoint, row, col):
             label = str(y0 + gy)
             cv2.putText(tile_rgb, label, (3, dy - 3), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 0), 1)
 
-    if cache_key in STATE["annotations"]:
-        ann_data = STATE["annotations"][cache_key]
+    if index in STATE["annotations"]:
+        ann_data = STATE["annotations"][index]
         colors = {
             idx: hex_to_rgb(c) for idx, c in STATE["class_colors"].items()
         }
@@ -1262,28 +1303,127 @@ def api_tile(well, timepoint, row, col):
     return send_file(buf, mimetype="image/png")
 
 
-@app.route("/api/stats/<well>/<timepoint>")
-def api_stats(well, timepoint):
-    """Get annotation statistics."""
-    try:
-        timepoint = int(timepoint)
-    except ValueError:
-        pass
-    cache_key = (well, timepoint)
-    if cache_key not in STATE["annotations"]:
-        return jsonify({"error": "No annotations loaded"}), 400
+# ---------------------------------------------------------------------------
+# SSE inference progress
+# ---------------------------------------------------------------------------
 
-    ann_data = STATE["annotations"][cache_key]
-    anns = ann_data["annotations"]
-    class_names = STATE["class_names"]
+@app.route("/api/inference/start/<int:index>", methods=["POST"])
+def api_inference_start(index):
+    """Start inference in background thread, return job_id for SSE tracking."""
+    if index < 0 or index >= len(STATE["images"]):
+        return jsonify({"error": "Invalid image index"}), 400
 
-    stats = {
-        "total": len(anns),
-        "model": sum(1 for a in anns if a.get("source") == "model"),
-        "manual": sum(1 for a in anns if a.get("source") == "manual"),
-    }
-    # Add per-class counts using dynamic class names
-    for idx, name in class_names.items():
-        stats[name] = sum(1 for a in anns if a["category_id"] == idx)
+    # If already cached, return immediately
+    if index in STATE["annotations"]:
+        return jsonify({"status": "cached", "job_id": None})
 
-    return jsonify(stats)
+    job_id = str(uuid.uuid4())[:8]
+    q = queue.Queue()
+
+    def _run():
+        try:
+            q.put({"stage": "loading", "message": "Loading image..."})
+            frame = load_image(index)
+            if frame is None:
+                q.put({"stage": "error", "message": "Failed to load image"})
+                return
+
+            filename = STATE["images"][index]["filename"]
+            segmenter = STATE.get("segmenter")
+
+            if segmenter is None:
+                h, w = frame.shape[:2]
+                result = {
+                    "index": index,
+                    "filename": filename,
+                    "width": w,
+                    "height": h,
+                    "annotations": [],
+                    "inference_time": 0,
+                    "next_id": 0,
+                }
+                STATE["annotations"][index] = result
+                q.put({"stage": "done", "message": "No model -- annotation-only mode"})
+                return
+
+            q.put({"stage": "running", "message": "Running model inference..."})
+            t0 = time.time()
+            model_result = segmenter.predict(frame)
+            elapsed = time.time() - t0
+
+            masks = model_result.masks
+            bboxes = model_result.bboxes
+            class_ids = model_result.class_ids
+            scores = model_result.scores
+
+            if masks.ndim == 3:
+                masks = masks[0]
+
+            annotations = []
+            n_detections = len(class_ids) if hasattr(class_ids, "__len__") else 0
+            for i in range(n_detections):
+                inst_id = i + 1
+                inst_mask = (masks == inst_id).astype(np.uint8)
+                if not inst_mask.any():
+                    continue
+                polygon = mask_to_polygon(inst_mask)
+                if polygon is None:
+                    continue
+                x1, y1, x2, y2 = bboxes[i]
+                bbox_xywh = [float(x1), float(y1), float(x2 - x1), float(y2 - y1)]
+                area = float(bbox_xywh[2] * bbox_xywh[3])
+                annotations.append({
+                    "id": i,
+                    "category_id": int(class_ids[i]),
+                    "bbox": bbox_xywh,
+                    "area": area,
+                    "segmentation": [polygon],
+                    "score": float(scores[i]),
+                    "source": "model",
+                })
+
+            h, w = frame.shape[:2]
+            ann_result = {
+                "index": index,
+                "filename": filename,
+                "width": w,
+                "height": h,
+                "annotations": annotations,
+                "inference_time": round(elapsed, 1),
+                "next_id": n_detections,
+            }
+            STATE["annotations"][index] = ann_result
+            q.put({"stage": "done", "message": f"Done: {len(annotations)} detections in {round(elapsed, 1)}s"})
+        except Exception as exc:
+            q.put({"stage": "error", "message": str(exc)})
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    _inference_jobs[job_id] = {"queue": q, "thread": t}
+
+    return jsonify({"status": "started", "job_id": job_id})
+
+
+@app.route("/api/inference/progress/<job_id>")
+def api_inference_progress(job_id):
+    """SSE stream for inference progress."""
+    if job_id not in _inference_jobs:
+        return jsonify({"error": "Unknown job"}), 404
+
+    job = _inference_jobs[job_id]
+    q = job["queue"]
+
+    def generate():
+        while True:
+            try:
+                event = q.get(timeout=30)
+                yield f"data: {json.dumps(event)}\n\n"
+                if event["stage"] in ("done", "error"):
+                    # Cleanup
+                    _inference_jobs.pop(job_id, None)
+                    break
+            except queue.Empty:
+                # Heartbeat to keep connection alive
+                yield f"data: {json.dumps({'stage': 'heartbeat'})}\n\n"
+
+    return Response(generate(), mimetype="text/event-stream")

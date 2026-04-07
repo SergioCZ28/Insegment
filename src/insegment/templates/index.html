@@ -36,10 +36,29 @@ body { font-family: 'Segoe UI', sans-serif; background: #1a1a2e; color: #e0e0e0;
 #status { font-size: 11px; color: #777; margin-top: auto; padding-top: 8px; border-top: 1px solid #333; }
 .help-text { font-size: 11px; color: #666; line-height: 1.4; }
 
+/* Navigation */
+.nav-row { display: flex; gap: 4px; align-items: center; }
+.nav-row button { flex: 0; min-width: 60px; }
+.nav-row .nav-counter { flex: 1; text-align: center; font-size: 13px; font-weight: bold; color: #4fc3f7; }
+.nav-row button:disabled { opacity: 0.3; cursor: not-allowed; }
+
 /* Canvas area */
 #canvas-container { flex: 1; position: relative; overflow: hidden; background: #111; cursor: crosshair; }
 canvas { position: absolute; top: 0; left: 0; image-rendering: pixelated; }
 #loading { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: 18px; color: #4fc3f7; display: none; }
+
+/* Inference overlay */
+#inference-overlay { position: absolute; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); display: none; z-index: 20; justify-content: center; align-items: center; flex-direction: column; gap: 16px; }
+#inference-overlay.active { display: flex; }
+#inference-message { font-size: 16px; color: #4fc3f7; }
+#inference-bar-container { width: 300px; height: 6px; background: #333; border-radius: 3px; overflow: hidden; }
+#inference-bar { height: 100%; width: 0%; background: #4fc3f7; border-radius: 3px; transition: width 0.3s; }
+#inference-bar.indeterminate { width: 100%; animation: indeterminate 1.5s infinite; }
+@keyframes indeterminate {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(100%); }
+}
+#inference-timer { font-size: 13px; color: #999; font-family: monospace; }
 
 /* Toolbar */
 #toolbar { position: absolute; top: 10px; left: 10px; z-index: 10; display: flex; gap: 6px; }
@@ -61,18 +80,20 @@ canvas { position: absolute; top: 0; left: 0; image-rendering: pixelated; }
     <h2>Insegment</h2>
 
     <div>
-        <label>Well</label>
-        <select id="well-select"><option value="">Loading...</option></select>
+        <label>Image</label>
+        <select id="image-select"><option value="">No images loaded</option></select>
     </div>
-    <div>
-        <label>Timepoint</label>
-        <select id="tp-select"><option value="0">0</option></select>
+    <div class="nav-row">
+        <button id="prev-btn" disabled title="Previous image (Left arrow)">Prev</button>
+        <span class="nav-counter" id="nav-counter">0 / 0</span>
+        <button id="next-btn" disabled title="Next image (Right arrow)">Next</button>
     </div>
-    <button id="load-btn">Load Frame + Run Inference</button>
+    <button id="load-btn">Load Image</button>
+    <button id="browse-btn" style="background: #e65100;">Browse Folder...</button>
 
     <hr style="border-color: #333;">
     <label>Load from folder (PNGs + COCO JSON)</label>
-    <button id="browse-folder-btn" style="background: #e65100;">Browse Folder...</button>
+    <button id="browse-folder-btn" style="background: #e65100; font-size: 11px;">Browse Semi-Annotation Folder...</button>
     <input type="text" id="folder-input" placeholder="...or paste path here" style="font-size: 11px;">
     <button id="scan-folder-btn" style="background: #e65100; font-size: 11px;">Scan</button>
     <select id="semi-select" style="display:none;"><option value="">-- Select frame --</option></select>
@@ -86,7 +107,6 @@ canvas { position: absolute; top: 0; left: 0; image-rendering: pixelated; }
     <div>
         <label>Active Class (for adding) <span style="font-size:10px;color:#666;">right-click to edit</span></label>
         <div id="class-buttons" style="display: flex; gap: 4px; margin-top: 4px; flex-wrap: wrap;">
-            <!-- Populated dynamically by fetchLabels() -->
         </div>
     </div>
 
@@ -127,7 +147,6 @@ canvas { position: absolute; top: 0; left: 0; image-rendering: pixelated; }
         <label>Detection Stats</label>
         <div class="stat-row"><span class="stat-label">Total:</span><span class="stat-value" id="stat-total">-</span></div>
         <div id="class-stats">
-            <!-- Populated dynamically by fetchLabels() -->
         </div>
         <div class="stat-row"><span class="stat-label">Model:</span><span class="stat-value" id="stat-model">-</span></div>
         <div class="stat-row"><span class="stat-label">Manual:</span><span class="stat-value" id="stat-manual">-</span></div>
@@ -147,7 +166,10 @@ canvas { position: absolute; top: 0; left: 0; image-rendering: pixelated; }
             <div class="context-menu-item" data-format="voc">Pascal VOC XML</div>
         </div>
     </div>
-    <button id="undo-btn" class="danger">Undo Last Action</button>
+    <div style="display:flex; gap:4px;">
+        <button id="undo-btn" class="danger" disabled style="flex:1;">Undo (Ctrl+Z)</button>
+        <button id="redo-btn" class="danger" disabled style="flex:1;">Redo (Ctrl+Y)</button>
+    </div>
 
     <hr style="border-color: #333;">
 
@@ -158,7 +180,9 @@ canvas { position: absolute; top: 0; left: 0; image-rendering: pixelated; }
         1-9: Class select / reclassify<br>
         <strong>Tools:</strong> C=Circle R=Rect E=Ellipse P=Polygon L=Lasso<br>
         D: Toggle stamp/drag mode<br>
-        G: Grid | F: Fit | Z: Undo<br>
+        G: Grid | F: Fit<br>
+        Ctrl+Z: Undo | Ctrl+Y: Redo<br>
+        Left/Right arrows: Prev/Next image<br>
         Space+drag: Pan | Scroll: Zoom<br>
         Ctrl+S: Save | Esc: Cancel
     </div>
@@ -169,7 +193,12 @@ canvas { position: absolute; top: 0; left: 0; image-rendering: pixelated; }
 <div id="canvas-container">
     <canvas id="bg-canvas"></canvas>
     <canvas id="overlay-canvas"></canvas>
-    <div id="loading">Running inference...</div>
+    <div id="loading">Loading...</div>
+    <div id="inference-overlay">
+        <div id="inference-message">Running inference...</div>
+        <div id="inference-bar-container"><div id="inference-bar"></div></div>
+        <div id="inference-timer">0.0s</div>
+    </div>
     <div id="toolbar">
         <button class="tool-btn active-tool" data-tool="circle" title="Circle (C)">&#9675; Circle</button>
         <button class="tool-btn" data-tool="rectangle" title="Rectangle (R)">&#9645; Rect</button>
@@ -187,9 +216,12 @@ canvas { position: absolute; top: 0; left: 0; image-rendering: pixelated; }
 // ============================================================================
 // State
 // ============================================================================
+const MAX_UNDO = 50;
 const state = {
-    well: null,
-    timepoint: 0,
+    currentIndex: -1,
+    imageCount: 0,
+    imageList: [],       // [{index, filename}, ...]
+    hasModel: false,
     annotations: [],
     selectedId: null,
     activeClass: 0,
@@ -205,15 +237,16 @@ const state = {
     panStartX: 0,
     panStartY: 0,
     spaceHeld: false,
-    // Undo
+    // Undo / Redo
     undoStack: [],
+    redoStack: [],
     // Image
     bgImage: null,
     // Grid overlay
     showGrid: false,
     // Shape tools
-    activeTool: 'circle',   // circle | rectangle | ellipse | polygon | freeform
-    toolMode: 'stamp',      // stamp | drag
+    activeTool: 'circle',
+    toolMode: 'stamp',
     stampParams: {
         circle: { radius: 4 },
         rectangle: { width: 10, height: 8 },
@@ -225,45 +258,36 @@ const state = {
     dragStartY: 0,
     dragCurrentX: 0,
     dragCurrentY: 0,
-    // Mouse position in image coords (for polygon preview line)
+    // Mouse position in image coords
     mouseImageX: 0,
     mouseImageY: 0,
     // Polygon drawing mode
     polygonMode: false,
-    polygonPoints: [],  // [{x, y}, ...]
+    polygonPoints: [],
     // Freeform drawing
     isDrawingFreeform: false,
-    freeformPoints: [],  // [{x, y}, ...]
+    freeformPoints: [],
     // Auto-save
     unsavedChanges: false,
     autoSaveTimer: null,
 };
 
 // Label configuration -- fetched from server on startup.
-// classConfig is a dictionary: { 0: {name: "single-cell", color: "#4caf50"}, ... }
-// This replaces the old hardcoded CLASS_COLORS and CLASS_STROKE.
 let classConfig = {};
 
-// Helper: get class name by ID (safe fallback if ID doesn't exist in config)
 function getClassName(classId) {
     return classConfig[classId] ? classConfig[classId].name : `class-${classId}`;
 }
-
-// Helper: convert hex color "#4caf50" to "rgba(76, 175, 80, ALPHA)" for fill rendering
 function hexToRgba(hex, alpha) {
     const r = parseInt(hex.slice(1, 3), 16);
     const g = parseInt(hex.slice(3, 5), 16);
     const b = parseInt(hex.slice(5, 7), 16);
     return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
-
-// Helper: get fill color for a class (with opacity)
 function getClassFillColor(classId, alpha) {
     const color = classConfig[classId] ? classConfig[classId].color : '#888888';
     return hexToRgba(color, alpha);
 }
-
-// Helper: get stroke color for a class
 function getClassStrokeColor(classId) {
     return classConfig[classId] ? classConfig[classId].color : '#888888';
 }
@@ -276,50 +300,100 @@ const bgCtx = bgCanvas.getContext('2d');
 const overlayCtx = overlayCanvas.getContext('2d');
 
 // ============================================================================
-// API calls
+// Undo / Redo helpers
 // ============================================================================
-async function loadFrames() {
-    const resp = await fetch('/api/frames');
+function pushAction(entry) {
+    state.undoStack.push(entry);
+    state.redoStack = [];  // New action clears redo
+    if (state.undoStack.length > MAX_UNDO) state.undoStack.shift();
+    updateUndoRedoButtons();
+}
+
+function updateUndoRedoButtons() {
+    document.getElementById('undo-btn').disabled = state.undoStack.length === 0;
+    document.getElementById('redo-btn').disabled = state.redoStack.length === 0;
+}
+
+// ============================================================================
+// API calls -- image loading
+// ============================================================================
+async function loadImages() {
+    const resp = await fetch('/api/images');
     const data = await resp.json();
-    const sel = document.getElementById('well-select');
+    state.imageList = data.images || [];
+    state.imageCount = data.count || 0;
+    state.hasModel = data.has_model || false;
+
+    const sel = document.getElementById('image-select');
     sel.innerHTML = '';
-    for (const [well, info] of Object.entries(data)) {
+    if (state.imageCount === 0) {
+        sel.innerHTML = '<option value="">No images loaded</option>';
+        updateNavButtons();
+        return;
+    }
+    for (const img of state.imageList) {
         const opt = document.createElement('option');
-        opt.value = well;
-        opt.textContent = `${well} (${info.n_timepoints} tp)`;
+        opt.value = img.index;
+        opt.textContent = img.filename;
         sel.appendChild(opt);
     }
-    if (sel.options.length > 0) {
-        updateTimepointSelector(Object.values(data)[0].n_timepoints);
+    updateNavButtons();
+
+    // Also load semi-annotation frames if available
+    if (data.semiannotation) {
+        const semiFrames = data.semiannotation.frames;
+        if (semiFrames && semiFrames.length > 0) {
+            document.getElementById('folder-input').value = data.semiannotation.dir;
+            const semiSel = document.getElementById('semi-select');
+            semiSel.innerHTML = '';
+            for (const frame of semiFrames) {
+                const opt = document.createElement('option');
+                opt.value = frame;
+                const match = frame.match(/_([KL]\d+)_.*_t(\d+)$/);
+                opt.textContent = match ? `${match[1]} t${parseInt(match[2])}` : frame;
+                semiSel.appendChild(opt);
+            }
+            semiSel.style.display = 'block';
+            document.getElementById('load-semi-btn').style.display = 'block';
+            document.getElementById('infer-semi-btn').style.display = 'block';
+        }
     }
-    sel.addEventListener('change', () => {
-        const w = sel.value;
-        if (data[w]) updateTimepointSelector(data[w].n_timepoints);
-    });
 }
 
-function updateTimepointSelector(n) {
-    const sel = document.getElementById('tp-select');
-    sel.innerHTML = '';
-    for (let i = 0; i < n; i++) {
-        const opt = document.createElement('option');
-        opt.value = i;
-        opt.textContent = `t${i}`;
-        sel.appendChild(opt);
+function updateNavButtons() {
+    const prevBtn = document.getElementById('prev-btn');
+    const nextBtn = document.getElementById('next-btn');
+    const counter = document.getElementById('nav-counter');
+    prevBtn.disabled = state.currentIndex <= 0;
+    nextBtn.disabled = state.currentIndex >= state.imageCount - 1;
+    if (state.currentIndex >= 0) {
+        counter.textContent = `${state.currentIndex + 1} / ${state.imageCount}`;
+    } else {
+        counter.textContent = `0 / ${state.imageCount}`;
     }
 }
 
-async function loadFrame() {
-    const well = document.getElementById('well-select').value;
-    const tp = parseInt(document.getElementById('tp-select').value);
-    if (!well) return;
+async function loadImage(index) {
+    if (index < 0 || index >= state.imageCount) return;
 
-    state.well = well;
-    state.timepoint = tp;
-    setStatus('Loading frame...');
+    // Auto-save current before switching
+    if (state.currentIndex >= 0 && state.unsavedChanges) {
+        await doAutoSave();
+    }
+
+    state.currentIndex = index;
+    // Clear undo/redo on navigation
+    state.undoStack = [];
+    state.redoStack = [];
+    updateUndoRedoButtons();
+
+    // Sync dropdown
+    document.getElementById('image-select').value = index;
+    updateNavButtons();
+
+    setStatus('Loading image...');
     document.getElementById('loading').style.display = 'block';
 
-    // Load BF image
     const img = new Image();
     img.onload = async () => {
         state.bgImage = img;
@@ -329,25 +403,122 @@ async function loadFrame() {
         fitToScreen();
         drawBg();
 
-        // Run inference
-        setStatus('Running inference...');
-        try {
-            const resp = await fetch(`/api/detections/${well}/${tp}`);
-            const data = await resp.json();
-            state.annotations = data.annotations || [];
-            state.undoStack = [];
-            updateSaveIndicator('saved');
-            drawOverlay();
-            updateStats();
-            setStatus(`Loaded: ${state.annotations.length} detections in ${data.inference_time}s`);
-            // Check for autosave recovery after frame loads
-            await checkAutosaveRecovery();
-        } catch (e) {
-            setStatus(`Error: ${e.message}`);
+        // Run inference (with SSE if model, sync if not)
+        if (state.hasModel) {
+            await runInferenceSSE(index);
+        } else {
+            setStatus('Loading detections...');
+            try {
+                const resp = await fetch(`/api/detections/${index}`);
+                const data = await resp.json();
+                state.annotations = data.annotations || [];
+                updateSaveIndicator('saved');
+                drawOverlay();
+                updateStats();
+                setStatus(`Loaded: ${state.annotations.length} annotations`);
+                await checkAutosaveRecovery();
+            } catch (e) {
+                setStatus(`Error: ${e.message}`);
+            }
         }
         document.getElementById('loading').style.display = 'none';
     };
-    img.src = `/api/frame/${well}/${tp}?t=${Date.now()}`;
+    img.src = `/api/image/${index}?t=${Date.now()}`;
+}
+
+function navigatePrev() {
+    if (state.currentIndex > 0) loadImage(state.currentIndex - 1);
+}
+function navigateNext() {
+    if (state.currentIndex < state.imageCount - 1) loadImage(state.currentIndex + 1);
+}
+
+// ============================================================================
+// SSE Inference Progress
+// ============================================================================
+async function runInferenceSSE(index) {
+    const overlay = document.getElementById('inference-overlay');
+    const msg = document.getElementById('inference-message');
+    const bar = document.getElementById('inference-bar');
+    const timer = document.getElementById('inference-timer');
+
+    overlay.classList.add('active');
+    msg.textContent = 'Starting inference...';
+    bar.className = 'indeterminate';
+    bar.style.width = '100%';
+
+    let elapsed = 0;
+    const timerInterval = setInterval(() => {
+        elapsed += 0.1;
+        timer.textContent = `${elapsed.toFixed(1)}s`;
+    }, 100);
+
+    try {
+        const startResp = await fetch(`/api/inference/start/${index}`, {method: 'POST'});
+        const startData = await startResp.json();
+
+        if (startData.status === 'cached') {
+            // Already cached, just fetch detections
+            clearInterval(timerInterval);
+            overlay.classList.remove('active');
+            const resp = await fetch(`/api/detections/${index}`);
+            const data = await resp.json();
+            state.annotations = data.annotations || [];
+            updateSaveIndicator('saved');
+            drawOverlay();
+            updateStats();
+            setStatus(`Loaded: ${state.annotations.length} cached annotations`);
+            await checkAutosaveRecovery();
+            return;
+        }
+
+        const jobId = startData.job_id;
+        const es = new EventSource(`/api/inference/progress/${jobId}`);
+
+        es.onmessage = async (event) => {
+            const data = JSON.parse(event.data);
+            if (data.stage === 'loading') {
+                msg.textContent = 'Loading image...';
+            } else if (data.stage === 'running') {
+                msg.textContent = 'Running model inference...';
+            } else if (data.stage === 'done') {
+                es.close();
+                clearInterval(timerInterval);
+                bar.className = '';
+                bar.style.width = '100%';
+                msg.textContent = data.message;
+
+                // Fetch final annotations
+                const resp = await fetch(`/api/detections/${index}`);
+                const annData = await resp.json();
+                state.annotations = annData.annotations || [];
+                updateSaveIndicator('saved');
+                drawOverlay();
+                updateStats();
+                setStatus(data.message);
+                await checkAutosaveRecovery();
+
+                setTimeout(() => { overlay.classList.remove('active'); }, 800);
+            } else if (data.stage === 'error') {
+                es.close();
+                clearInterval(timerInterval);
+                overlay.classList.remove('active');
+                setStatus(`Inference error: ${data.message}`);
+            }
+        };
+
+        es.onerror = () => {
+            es.close();
+            clearInterval(timerInterval);
+            overlay.classList.remove('active');
+            setStatus('Inference connection lost');
+        };
+
+    } catch (e) {
+        clearInterval(timerInterval);
+        overlay.classList.remove('active');
+        setStatus(`Error: ${e.message}`);
+    }
 }
 
 // ============================================================================
@@ -376,17 +547,15 @@ function markUnsaved() {
 }
 
 async function doAutoSave() {
-    if (!state.well || !state.unsavedChanges) return;
+    if (state.currentIndex < 0 || !state.unsavedChanges) return;
     updateSaveIndicator('saving');
     try {
-        // Server-side autosave
         await fetch('/api/autosave', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({well: state.well, timepoint: state.timepoint})
+            body: JSON.stringify({index: state.currentIndex})
         });
-        // localStorage backup
-        const key = `insegment_autosave_${state.well}_${state.timepoint}`;
+        const key = `insegment_autosave_${state.currentIndex}`;
         localStorage.setItem(key, JSON.stringify({
             annotations: state.annotations,
             timestamp: Date.now(),
@@ -400,9 +569,8 @@ async function doAutoSave() {
 }
 
 async function checkAutosaveRecovery() {
-    if (!state.well) return;
-    // Check localStorage first (faster)
-    const key = `insegment_autosave_${state.well}_${state.timepoint}`;
+    if (state.currentIndex < 0) return;
+    const key = `insegment_autosave_${state.currentIndex}`;
     const stored = localStorage.getItem(key);
     if (stored) {
         const parsed = JSON.parse(stored);
@@ -412,13 +580,11 @@ async function checkAutosaveRecovery() {
             const timeStr = mins > 0 ? `${mins}m ${age % 60}s` : `${age}s`;
             if (confirm(`Found auto-saved annotations (${parsed.annotations.length} annotations, ${timeStr} ago). Restore?`)) {
                 state.annotations = parsed.annotations;
-                // Push to server
                 await fetch('/api/restore', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({
-                        well: state.well,
-                        timepoint: state.timepoint,
+                        index: state.currentIndex,
                         annotations: parsed.annotations
                     })
                 });
@@ -429,9 +595,8 @@ async function checkAutosaveRecovery() {
             }
         }
     }
-    // Also check server-side autosave
     try {
-        const resp = await fetch(`/api/autosave/${state.well}/${state.timepoint}`);
+        const resp = await fetch(`/api/autosave/${state.currentIndex}`);
         const data = await resp.json();
         if (data.has_autosave && data.n_annotations > 0) {
             if (confirm(`Found server auto-save (${data.n_annotations} annotations). Restore?`)) {
@@ -440,8 +605,7 @@ async function checkAutosaveRecovery() {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({
-                        well: state.well,
-                        timepoint: state.timepoint,
+                        index: state.currentIndex,
                         annotations: data.annotations
                     })
                 });
@@ -454,8 +618,8 @@ async function checkAutosaveRecovery() {
 }
 
 function clearAutosave() {
-    if (!state.well) return;
-    const key = `insegment_autosave_${state.well}_${state.timepoint}`;
+    if (state.currentIndex < 0) return;
+    const key = `insegment_autosave_${state.currentIndex}`;
     localStorage.removeItem(key);
     state.unsavedChanges = false;
     updateSaveIndicator('saved');
@@ -466,19 +630,15 @@ function clearAutosave() {
 // ============================================================================
 function setActiveTool(tool) {
     state.activeTool = tool;
-    // Sync polygonMode flag for backward compat
     state.polygonMode = (tool === 'polygon');
-    // Update toolbar button highlights
     document.querySelectorAll('.tool-btn').forEach(btn => {
         btn.classList.toggle('active-tool', btn.dataset.tool === tool);
     });
-    // Show/hide stamp params
     const isStampShape = ['circle', 'rectangle', 'ellipse'].includes(tool);
     document.getElementById('stamp-params-panel').style.display = isStampShape ? 'block' : 'none';
     document.getElementById('stamp-circle-params').style.display = tool === 'circle' ? 'flex' : 'none';
     document.getElementById('stamp-rect-params').style.display = tool === 'rectangle' ? 'flex' : 'none';
     document.getElementById('stamp-ellipse-params').style.display = tool === 'ellipse' ? 'flex' : 'none';
-    // Update mode indicator
     const indicator = document.getElementById('mode-indicator');
     if (tool === 'polygon') {
         indicator.textContent = 'POLYGON MODE (click to add points, double-click or click first point to close)';
@@ -491,7 +651,6 @@ function setActiveTool(tool) {
     } else {
         indicator.style.display = 'none';
     }
-    // Cancel any in-progress polygon/freeform
     state.polygonPoints = [];
     state.freeformPoints = [];
     state.isDrawingFreeform = false;
@@ -519,8 +678,8 @@ function syncStampParams() {
 let shapePresets = JSON.parse(localStorage.getItem('insegment_presets') || '[]');
 
 function renderPresets() {
-    const container = document.getElementById('preset-buttons');
-    container.innerHTML = '';
+    const cont = document.getElementById('preset-buttons');
+    cont.innerHTML = '';
     shapePresets.forEach((preset, idx) => {
         const btn = document.createElement('div');
         btn.className = 'class-btn';
@@ -537,7 +696,6 @@ function renderPresets() {
             document.getElementById('mode-toggle-btn').classList.toggle('active-tool', preset.mode === 'drag');
             if (preset.params) {
                 state.stampParams[preset.tool] = {...preset.params};
-                // Sync UI inputs
                 if (preset.tool === 'circle') document.getElementById('stamp-radius').value = preset.params.radius || 4;
                 if (preset.tool === 'rectangle') {
                     document.getElementById('stamp-width').value = preset.params.width || 10;
@@ -558,7 +716,7 @@ function renderPresets() {
                 renderPresets();
             }
         });
-        container.appendChild(btn);
+        cont.appendChild(btn);
     });
 }
 
@@ -571,12 +729,7 @@ function savePreset() {
     syncStampParams();
     const name = prompt('Preset name:', `${tool} ${JSON.stringify(state.stampParams[tool])}`);
     if (!name) return;
-    shapePresets.push({
-        name,
-        tool,
-        mode: state.toolMode,
-        params: {...state.stampParams[tool]},
-    });
+    shapePresets.push({ name, tool, mode: state.toolMode, params: {...state.stampParams[tool]} });
     localStorage.setItem('insegment_presets', JSON.stringify(shapePresets));
     renderPresets();
     setStatus(`Saved preset: ${name}`);
@@ -584,11 +737,13 @@ function savePreset() {
 
 renderPresets();
 
+// ============================================================================
+// Annotation CRUD
+// ============================================================================
 async function addAnnotation(x, y) {
     syncStampParams();
     const body = {
-        well: state.well,
-        timepoint: state.timepoint,
+        index: state.currentIndex,
         x: x,
         y: y,
         class_id: state.activeClass,
@@ -602,7 +757,7 @@ async function addAnnotation(x, y) {
     });
     const data = await resp.json();
     if (data.status === 'ok') {
-        state.undoStack.push({action: 'add', annotation: data.annotation});
+        pushAction({action: 'add', annotation: data.annotation});
         state.annotations.push(data.annotation);
         drawOverlay();
         updateStats();
@@ -612,12 +767,12 @@ async function addAnnotation(x, y) {
 
 async function removeAnnotation(annId) {
     const ann = state.annotations.find(a => a.id === annId);
-    const resp = await fetch(`/api/remove/${state.well}/${state.timepoint}/${annId}`, {
+    const resp = await fetch(`/api/remove/${state.currentIndex}/${annId}`, {
         method: 'POST'
     });
     const data = await resp.json();
     if (data.status === 'ok') {
-        state.undoStack.push({action: 'remove', annotation: ann});
+        pushAction({action: 'remove', annotation: ann});
         state.annotations = state.annotations.filter(a => a.id !== annId);
         drawOverlay();
         updateStats();
@@ -628,14 +783,14 @@ async function removeAnnotation(annId) {
 async function reclassifyAnnotation(annId, newClass) {
     const ann = state.annotations.find(a => a.id === annId);
     const oldClass = ann.category_id;
-    const resp = await fetch(`/api/reclassify/${state.well}/${state.timepoint}/${annId}`, {
+    const resp = await fetch(`/api/reclassify/${state.currentIndex}/${annId}`, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({class_id: newClass})
     });
     const data = await resp.json();
     if (data.status === 'ok') {
-        state.undoStack.push({action: 'reclassify', annId, oldClass, newClass});
+        pushAction({action: 'reclassify', annId, oldClass, newClass});
         ann.category_id = newClass;
         drawOverlay();
         updateStats();
@@ -644,13 +799,13 @@ async function reclassifyAnnotation(annId, newClass) {
 }
 
 async function exportAnnotations(format = 'coco') {
-    if (!state.well) return;
+    if (state.currentIndex < 0) return;
     const saveBtn = document.getElementById('save-btn');
     const exportBtn = document.getElementById('export-btn');
     saveBtn.textContent = 'Saving...';
     exportBtn.textContent = 'Saving...';
     try {
-        const resp = await fetch(`/api/export/${state.well}/${state.timepoint}?format=${format}`);
+        const resp = await fetch(`/api/export/${state.currentIndex}?format=${format}`);
         const data = await resp.json();
         if (data.status === 'ok') {
             clearAutosave();
@@ -673,7 +828,7 @@ async function exportAnnotations(format = 'coco') {
     } catch (e) {
         setStatus(`Error: ${e.message}`);
         saveBtn.textContent = 'Save (Ctrl+S)';
-        exportBtn.textContent = 'Export COCO JSON';
+        exportBtn.textContent = 'Export As...';
     }
 }
 
@@ -724,7 +879,6 @@ function drawOverlay() {
         const classId = ann.category_id;
         const isSelected = ann.id === state.selectedId;
 
-        // Fill
         overlayCtx.beginPath();
         overlayCtx.moveTo(poly[0], poly[1]);
         for (let i = 2; i < poly.length; i += 2) {
@@ -732,16 +886,13 @@ function drawOverlay() {
         }
         overlayCtx.closePath();
 
-        const fillColor = getClassFillColor(classId, state.opacity);
-        overlayCtx.fillStyle = fillColor;
+        overlayCtx.fillStyle = getClassFillColor(classId, state.opacity);
         overlayCtx.fill();
 
-        // Stroke
         overlayCtx.strokeStyle = isSelected ? '#ffffff' : getClassStrokeColor(classId);
         overlayCtx.lineWidth = isSelected ? 2 / state.zoom : 1 / state.zoom;
         overlayCtx.stroke();
 
-        // Manual marker
         if (ann.source === 'manual') {
             const cx = poly.reduce((s, v, i) => i % 2 === 0 ? s + v : s, 0) / (poly.length / 2);
             const cy = poly.reduce((s, v, i) => i % 2 === 1 ? s + v : s, 0) / (poly.length / 2);
@@ -752,30 +903,19 @@ function drawOverlay() {
         }
     }
 
-    // Draw 3x3 grid overlay (in image coordinates so it moves with pan/zoom)
+    // Grid overlay
     if (state.showGrid && state.imgWidth > 0) {
         overlayCtx.strokeStyle = 'rgba(255, 255, 255, 0.12)';
         overlayCtx.lineWidth = 1 / state.zoom;
         overlayCtx.setLineDash([]);
-
-        // Vertical lines (divide into 3 columns)
         for (let i = 1; i < 3; i++) {
             const x = (state.imgWidth / 3) * i;
-            overlayCtx.beginPath();
-            overlayCtx.moveTo(x, 0);
-            overlayCtx.lineTo(x, state.imgHeight);
-            overlayCtx.stroke();
+            overlayCtx.beginPath(); overlayCtx.moveTo(x, 0); overlayCtx.lineTo(x, state.imgHeight); overlayCtx.stroke();
         }
-        // Horizontal lines (divide into 3 rows)
         for (let i = 1; i < 3; i++) {
             const y = (state.imgHeight / 3) * i;
-            overlayCtx.beginPath();
-            overlayCtx.moveTo(0, y);
-            overlayCtx.lineTo(state.imgWidth, y);
-            overlayCtx.stroke();
+            overlayCtx.beginPath(); overlayCtx.moveTo(0, y); overlayCtx.lineTo(state.imgWidth, y); overlayCtx.stroke();
         }
-
-        // Quadrant labels (very subtle)
         overlayCtx.font = `${Math.max(14, 24 / state.zoom)}px sans-serif`;
         overlayCtx.fillStyle = 'rgba(255, 255, 255, 0.10)';
         const labels = ['A1', 'A2', 'A3', 'B1', 'B2', 'B3', 'C1', 'C2', 'C3'];
@@ -788,80 +928,55 @@ function drawOverlay() {
         }
     }
 
-    // Draw polygon-in-progress
+    // Polygon in-progress
     if (state.activeTool === 'polygon' && state.polygonPoints.length > 0) {
         const pts = state.polygonPoints;
         overlayCtx.beginPath();
         overlayCtx.moveTo(pts[0].x, pts[0].y);
-        for (let i = 1; i < pts.length; i++) {
-            overlayCtx.lineTo(pts[i].x, pts[i].y);
-        }
-        // Preview line to cursor
+        for (let i = 1; i < pts.length; i++) overlayCtx.lineTo(pts[i].x, pts[i].y);
         overlayCtx.lineTo(state.mouseImageX, state.mouseImageY);
         overlayCtx.strokeStyle = '#ff9800';
         overlayCtx.lineWidth = 2 / state.zoom;
         overlayCtx.setLineDash([5 / state.zoom, 5 / state.zoom]);
         overlayCtx.stroke();
         overlayCtx.setLineDash([]);
-
-        // Draw vertices
         for (const pt of pts) {
-            overlayCtx.beginPath();
-            overlayCtx.arc(pt.x, pt.y, 3 / state.zoom, 0, Math.PI * 2);
-            overlayCtx.fillStyle = '#ff9800';
-            overlayCtx.fill();
+            overlayCtx.beginPath(); overlayCtx.arc(pt.x, pt.y, 3 / state.zoom, 0, Math.PI * 2);
+            overlayCtx.fillStyle = '#ff9800'; overlayCtx.fill();
         }
-        // Highlight first point (close target)
         if (pts.length >= 3) {
-            overlayCtx.beginPath();
-            overlayCtx.arc(pts[0].x, pts[0].y, 5 / state.zoom, 0, Math.PI * 2);
-            overlayCtx.strokeStyle = '#ff9800';
-            overlayCtx.lineWidth = 1.5 / state.zoom;
-            overlayCtx.stroke();
+            overlayCtx.beginPath(); overlayCtx.arc(pts[0].x, pts[0].y, 5 / state.zoom, 0, Math.PI * 2);
+            overlayCtx.strokeStyle = '#ff9800'; overlayCtx.lineWidth = 1.5 / state.zoom; overlayCtx.stroke();
         }
     }
 
-    // Draw drag shape preview
+    // Drag shape preview
     if (state.isDragging) {
         const sx = state.dragStartX, sy = state.dragStartY;
         const cx = state.dragCurrentX, cy = state.dragCurrentY;
         overlayCtx.strokeStyle = '#ff9800';
         overlayCtx.lineWidth = 2 / state.zoom;
         overlayCtx.setLineDash([5 / state.zoom, 5 / state.zoom]);
-
         if (state.activeTool === 'rectangle') {
-            const x = Math.min(sx, cx), y = Math.min(sy, cy);
-            const w = Math.abs(cx - sx), h = Math.abs(cy - sy);
-            overlayCtx.strokeRect(x, y, w, h);
+            overlayCtx.strokeRect(Math.min(sx, cx), Math.min(sy, cy), Math.abs(cx - sx), Math.abs(cy - sy));
         } else if (state.activeTool === 'circle') {
             const mx = (sx + cx) / 2, my = (sy + cy) / 2;
             const r = Math.sqrt((cx - sx) ** 2 + (cy - sy) ** 2) / 2;
-            overlayCtx.beginPath();
-            overlayCtx.arc(mx, my, r, 0, Math.PI * 2);
-            overlayCtx.stroke();
+            overlayCtx.beginPath(); overlayCtx.arc(mx, my, r, 0, Math.PI * 2); overlayCtx.stroke();
         } else if (state.activeTool === 'ellipse') {
             const mx = (sx + cx) / 2, my = (sy + cy) / 2;
-            const rx = Math.abs(cx - sx) / 2, ry = Math.abs(cy - sy) / 2;
-            overlayCtx.beginPath();
-            overlayCtx.ellipse(mx, my, Math.max(rx, 0.1), Math.max(ry, 0.1), 0, 0, Math.PI * 2);
-            overlayCtx.stroke();
+            overlayCtx.beginPath(); overlayCtx.ellipse(mx, my, Math.max(Math.abs(cx - sx) / 2, 0.1), Math.max(Math.abs(cy - sy) / 2, 0.1), 0, 0, Math.PI * 2); overlayCtx.stroke();
         }
         overlayCtx.setLineDash([]);
     }
 
-    // Draw freeform in-progress
+    // Freeform in-progress
     if (state.isDrawingFreeform && state.freeformPoints.length > 1) {
         const pts = state.freeformPoints;
-        overlayCtx.beginPath();
-        overlayCtx.moveTo(pts[0].x, pts[0].y);
-        for (let i = 1; i < pts.length; i++) {
-            overlayCtx.lineTo(pts[i].x, pts[i].y);
-        }
-        overlayCtx.strokeStyle = '#ff9800';
-        overlayCtx.lineWidth = 2 / state.zoom;
-        overlayCtx.setLineDash([4 / state.zoom, 4 / state.zoom]);
-        overlayCtx.stroke();
-        overlayCtx.setLineDash([]);
+        overlayCtx.beginPath(); overlayCtx.moveTo(pts[0].x, pts[0].y);
+        for (let i = 1; i < pts.length; i++) overlayCtx.lineTo(pts[i].x, pts[i].y);
+        overlayCtx.strokeStyle = '#ff9800'; overlayCtx.lineWidth = 2 / state.zoom;
+        overlayCtx.setLineDash([4 / state.zoom, 4 / state.zoom]); overlayCtx.stroke(); overlayCtx.setLineDash([]);
     }
 
     overlayCtx.restore();
@@ -870,7 +985,6 @@ function drawOverlay() {
 function updateStats() {
     const anns = state.annotations;
     document.getElementById('stat-total').textContent = anns.length;
-    // Update per-class counts dynamically
     for (const idStr of Object.keys(classConfig)) {
         const id = parseInt(idStr);
         const el = document.getElementById(`stat-class-${id}`);
@@ -891,69 +1005,46 @@ function screenToImage(sx, sy) {
     const rect = container.getBoundingClientRect();
     const cx = sx - rect.left;
     const cy = sy - rect.top;
-    const ix = (cx - state.panX) / state.zoom;
-    const iy = (cy - state.panY) / state.zoom;
-    return [ix, iy];
+    return [(cx - state.panX) / state.zoom, (cy - state.panY) / state.zoom];
 }
 
 function pointInPolygon(px, py, poly) {
-    // Ray-casting algorithm for point-in-polygon
     let inside = false;
     const n = poly.length / 2;
     for (let i = 0, j = n - 1; i < n; j = i++) {
         const xi = poly[i * 2], yi = poly[i * 2 + 1];
         const xj = poly[j * 2], yj = poly[j * 2 + 1];
-        if (((yi > py) !== (yj > py)) && (px < (xj - xi) * (py - yi) / (yj - yi) + xi)) {
-            inside = !inside;
-        }
+        if (((yi > py) !== (yj > py)) && (px < (xj - xi) * (py - yi) / (yj - yi) + xi)) inside = !inside;
     }
     return inside;
 }
 
 function findAnnotationAtPoint(ix, iy) {
-    // Check if point is INSIDE any annotation polygon (smallest area first for overlapping)
     let candidates = [];
     for (const ann of state.annotations) {
         const seg = ann.segmentation;
         if (!seg || !seg[0] || seg[0].length < 6) continue;
-        if (pointInPolygon(ix, iy, seg[0])) {
-            candidates.push(ann);
-        }
+        if (pointInPolygon(ix, iy, seg[0])) candidates.push(ann);
     }
     if (candidates.length === 0) return null;
-    // Return smallest (most specific) if overlapping
     candidates.sort((a, b) => (a.area || 999999) - (b.area || 999999));
     return candidates[0];
 }
 
 function findNearestAnnotation(ix, iy, maxDist = 15) {
-    // First check if inside any polygon
     const inside = findAnnotationAtPoint(ix, iy);
     if (inside) return inside;
-
-    // Fallback: nearest centroid (for right-click remove)
-    let best = null;
-    let bestDist = maxDist;
-
+    let best = null, bestDist = maxDist;
     for (const ann of state.annotations) {
         const seg = ann.segmentation;
         if (!seg || !seg[0]) continue;
-
         const poly = seg[0];
         let cx = 0, cy = 0;
         const n = poly.length / 2;
-        for (let i = 0; i < poly.length; i += 2) {
-            cx += poly[i];
-            cy += poly[i + 1];
-        }
-        cx /= n;
-        cy /= n;
-
+        for (let i = 0; i < poly.length; i += 2) { cx += poly[i]; cy += poly[i + 1]; }
+        cx /= n; cy /= n;
         const dist = Math.sqrt((ix - cx) ** 2 + (iy - cy) ** 2);
-        if (dist < bestDist) {
-            bestDist = dist;
-            best = ann;
-        }
+        if (dist < bestDist) { bestDist = dist; best = ann; }
     }
     return best;
 }
@@ -963,7 +1054,6 @@ function findNearestAnnotation(ix, iy, maxDist = 15) {
 // ============================================================================
 overlayCanvas.addEventListener('mousedown', (e) => {
     if (e.shiftKey || e.button === 1 || state.spaceHeld) {
-        // Pan (shift+drag, middle-click, or spacebar+drag)
         state.isPanning = true;
         state.panStartX = e.clientX - state.panX;
         state.panStartY = e.clientY - state.panY;
@@ -975,7 +1065,6 @@ overlayCanvas.addEventListener('mousedown', (e) => {
     const [ix, iy] = screenToImage(e.clientX, e.clientY);
 
     if (e.button === 2) {
-        // Right-click: remove nearest
         e.preventDefault();
         const ann = findNearestAnnotation(ix, iy);
         if (ann) {
@@ -989,27 +1078,23 @@ overlayCanvas.addEventListener('mousedown', (e) => {
         const tool = state.activeTool;
         const inBounds = ix >= 0 && ix < state.imgWidth && iy >= 0 && iy < state.imgHeight;
 
-        // Polygon mode: add vertex (or close on first point)
         if (tool === 'polygon') {
             if (inBounds) {
-                // Close polygon if clicking near first point
                 if (state.polygonPoints.length >= 3) {
                     const first = state.polygonPoints[0];
                     const dist = Math.sqrt((ix - first.x) ** 2 + (iy - first.y) ** 2);
                     if (dist < 5 / state.zoom) {
-                        // Trigger polygon close by dispatching dblclick logic
                         overlayCanvas.dispatchEvent(new MouseEvent('dblclick', e));
                         return;
                     }
                 }
                 state.polygonPoints.push({x: Math.round(ix), y: Math.round(iy)});
                 drawOverlay();
-                setStatus(`Polygon: ${state.polygonPoints.length} pts (dbl-click or click 1st point to close)`);
+                setStatus(`Polygon: ${state.polygonPoints.length} pts`);
             }
             return;
         }
 
-        // Freeform mode: start drawing
         if (tool === 'freeform') {
             if (inBounds) {
                 state.isDrawingFreeform = true;
@@ -1018,22 +1103,16 @@ overlayCanvas.addEventListener('mousedown', (e) => {
             return;
         }
 
-        // Stamp/drag shapes (circle, rectangle, ellipse)
         const isStampShape = ['circle', 'rectangle', 'ellipse'].includes(tool);
         if (isStampShape && state.toolMode === 'drag') {
-            // Start drag
             if (inBounds) {
                 state.isDragging = true;
-                state.dragStartX = ix;
-                state.dragStartY = iy;
-                state.dragCurrentX = ix;
-                state.dragCurrentY = iy;
+                state.dragStartX = ix; state.dragStartY = iy;
+                state.dragCurrentX = ix; state.dragCurrentY = iy;
             }
             return;
         }
 
-        // Default: stamp mode or non-shape tool
-        // Check if clicking INSIDE an existing annotation polygon
         const ann = findAnnotationAtPoint(ix, iy);
         if (ann) {
             state.selectedId = ann.id;
@@ -1053,81 +1132,52 @@ overlayCanvas.addEventListener('mousemove', (e) => {
     if (state.isPanning) {
         state.panX = e.clientX - state.panStartX;
         state.panY = e.clientY - state.panStartY;
-        drawBg();
-        drawOverlay();
+        drawBg(); drawOverlay();
         return;
     }
-
     const [ix, iy] = screenToImage(e.clientX, e.clientY);
-    state.mouseImageX = ix;
-    state.mouseImageY = iy;
+    state.mouseImageX = ix; state.mouseImageY = iy;
     document.getElementById('coords').textContent = `x: ${Math.round(ix)}, y: ${Math.round(iy)} | zoom: ${(state.zoom * 100).toFixed(0)}%`;
 
-    // Drag mode preview
-    if (state.isDragging) {
-        state.dragCurrentX = ix;
-        state.dragCurrentY = iy;
-        drawOverlay();
-        return;
-    }
+    if (state.isDragging) { state.dragCurrentX = ix; state.dragCurrentY = iy; drawOverlay(); return; }
 
-    // Freeform drawing
     if (state.isDrawingFreeform && state.freeformPoints.length > 0) {
         const last = state.freeformPoints[state.freeformPoints.length - 1];
-        const dist = Math.sqrt((ix - last.x) ** 2 + (iy - last.y) ** 2);
-        if (dist >= 2) {
+        if (Math.sqrt((ix - last.x) ** 2 + (iy - last.y) ** 2) >= 2) {
             state.freeformPoints.push({x: Math.round(ix), y: Math.round(iy)});
             drawOverlay();
         }
         return;
     }
 
-    // Polygon preview line (redraw to show line from last point to cursor)
-    if (state.activeTool === 'polygon' && state.polygonPoints.length > 0) {
-        drawOverlay();
-    }
+    if (state.activeTool === 'polygon' && state.polygonPoints.length > 0) drawOverlay();
 });
 
 overlayCanvas.addEventListener('mouseup', async (e) => {
-    if (state.isPanning) {
-        state.isPanning = false;
-        overlayCanvas.style.cursor = 'crosshair';
-        return;
-    }
+    if (state.isPanning) { state.isPanning = false; overlayCanvas.style.cursor = 'crosshair'; return; }
 
-    // Finish drag shape
     if (state.isDragging) {
         state.isDragging = false;
         const sx = state.dragStartX, sy = state.dragStartY;
         const ex = state.dragCurrentX, ey = state.dragCurrentY;
         const cx = (sx + ex) / 2, cy = (sy + ey) / 2;
         const tool = state.activeTool;
-
-        // Minimum drag distance check
         const dragDist = Math.sqrt((ex - sx) ** 2 + (ey - sy) ** 2);
         if (dragDist < 2) { drawOverlay(); return; }
 
-        // Temporarily override stamp params with drag dimensions
         const savedParams = {...state.stampParams[tool]};
-        if (tool === 'circle') {
-            state.stampParams.circle = { radius: dragDist / 2 };
-        } else if (tool === 'rectangle') {
-            state.stampParams.rectangle = { width: Math.abs(ex - sx), height: Math.abs(ey - sy) };
-        } else if (tool === 'ellipse') {
-            state.stampParams.ellipse = { rx: Math.abs(ex - sx) / 2, ry: Math.abs(ey - sy) / 2 };
-        }
+        if (tool === 'circle') state.stampParams.circle = { radius: dragDist / 2 };
+        else if (tool === 'rectangle') state.stampParams.rectangle = { width: Math.abs(ex - sx), height: Math.abs(ey - sy) };
+        else if (tool === 'ellipse') state.stampParams.ellipse = { rx: Math.abs(ex - sx) / 2, ry: Math.abs(ey - sy) / 2 };
 
         await addAnnotation(Math.round(cx), Math.round(cy));
         state.stampParams[tool] = savedParams;
-        setStatus(`Added ${tool} via drag at (${Math.round(cx)}, ${Math.round(cy)})`);
         drawOverlay();
         return;
     }
 
-    // Finish freeform shape
     if (state.isDrawingFreeform && state.freeformPoints.length >= 3) {
         state.isDrawingFreeform = false;
-        // Simplify: keep every Nth point to cap at ~50
         let pts = state.freeformPoints;
         const step = Math.max(1, Math.floor(pts.length / 50));
         const simplified = pts.filter((_, i) => i % step === 0);
@@ -1138,26 +1188,18 @@ overlayCanvas.addEventListener('mouseup', async (e) => {
             const resp = await fetch('/api/add_polygon', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({
-                    well: state.well,
-                    timepoint: state.timepoint,
-                    polygon: flatPoly,
-                    class_id: state.activeClass
-                })
+                body: JSON.stringify({ index: state.currentIndex, polygon: flatPoly, class_id: state.activeClass })
             });
             const data = await resp.json();
             if (data.status === 'ok') {
-                state.undoStack.push({action: 'add', annotation: data.annotation});
+                pushAction({action: 'add', annotation: data.annotation});
                 state.annotations.push(data.annotation);
                 setStatus(`Added freeform shape (${simplified.length} vertices)`);
                 markUnsaved();
             }
-        } catch (err) {
-            setStatus(`Error: ${err.message}`);
-        }
+        } catch (err) { setStatus(`Error: ${err.message}`); }
         state.freeformPoints = [];
-        drawOverlay();
-        updateStats();
+        drawOverlay(); updateStats();
         return;
     }
     state.isDrawingFreeform = false;
@@ -1170,14 +1212,10 @@ overlayCanvas.addEventListener('wheel', (e) => {
     const [ix, iy] = screenToImage(e.clientX, e.clientY);
     const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
     const newZoom = Math.max(0.1, Math.min(50, state.zoom * factor));
-
-    // Zoom toward cursor
     state.panX -= ix * (newZoom - state.zoom);
     state.panY -= iy * (newZoom - state.zoom);
     state.zoom = newZoom;
-
-    drawBg();
-    drawOverlay();
+    drawBg(); drawOverlay();
 });
 
 overlayCanvas.addEventListener('contextmenu', (e) => e.preventDefault());
@@ -1186,57 +1224,37 @@ overlayCanvas.addEventListener('contextmenu', (e) => e.preventDefault());
 overlayCanvas.addEventListener('dblclick', async (e) => {
     if (!state.polygonMode || state.polygonPoints.length < 3) return;
     e.preventDefault();
+    if (state.polygonPoints.length > 3) state.polygonPoints.pop();
 
-    // Remove the last point (added by the second click of double-click)
-    if (state.polygonPoints.length > 3) {
-        state.polygonPoints.pop();
-    }
-
-    // Flatten points to [x1, y1, x2, y2, ...]
     const flatPoly = [];
-    for (const pt of state.polygonPoints) {
-        flatPoly.push(pt.x, pt.y);
-    }
+    for (const pt of state.polygonPoints) flatPoly.push(pt.x, pt.y);
 
-    // Send to server
     try {
         const resp = await fetch('/api/add_polygon', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({
-                well: state.well,
-                timepoint: state.timepoint,
-                polygon: flatPoly,
-                class_id: state.activeClass
-            })
+            body: JSON.stringify({ index: state.currentIndex, polygon: flatPoly, class_id: state.activeClass })
         });
         const data = await resp.json();
         if (data.status === 'ok') {
-            state.undoStack.push({action: 'add', annotation: data.annotation});
+            pushAction({action: 'add', annotation: data.annotation});
             state.annotations.push(data.annotation);
             setStatus(`Added polygon ${getClassName(state.activeClass)} (${state.polygonPoints.length} vertices)`);
             markUnsaved();
         }
-    } catch (err) {
-        setStatus(`Error: ${err.message}`);
-    }
+    } catch (err) { setStatus(`Error: ${err.message}`); }
 
     state.polygonPoints = [];
-    drawOverlay();
-    updateStats();
+    drawOverlay(); updateStats();
 });
 
 // Keyboard
 document.addEventListener('keydown', (e) => {
-    // Ignore shortcuts when typing in inputs
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA') return;
 
-    if (e.key === ' ') {
-        e.preventDefault();
-        state.spaceHeld = true;
-        overlayCanvas.style.cursor = 'grab';
-    }
-    // Dynamic class shortcuts: keys 1-9 map to class IDs based on sorted order
+    if (e.key === ' ') { e.preventDefault(); state.spaceHeld = true; overlayCanvas.style.cursor = 'grab'; }
+
+    // Number keys: class select / reclassify
     const numKey = parseInt(e.key);
     if (numKey >= 1 && numKey <= 9) {
         const sortedIds = Object.keys(classConfig).map(Number).sort((a, b) => a - b);
@@ -1255,18 +1273,22 @@ document.addEventListener('keydown', (e) => {
             }
         }
     }
-    if ((e.key === 'z' || e.key === 'Z') && (e.ctrlKey || e.metaKey)) {
+
+    // Undo: Ctrl+Z
+    if ((e.key === 'z' || e.key === 'Z') && (e.ctrlKey || e.metaKey) && !e.shiftKey) {
         e.preventDefault();
         undoLastAction();
-    } else if (e.key === 'z' || e.key === 'Z') {
-        undoLastAction();
     }
+    // Redo: Ctrl+Shift+Z or Ctrl+Y
+    if (((e.key === 'z' || e.key === 'Z') && (e.ctrlKey || e.metaKey) && e.shiftKey) ||
+        ((e.key === 'y' || e.key === 'Y') && (e.ctrlKey || e.metaKey))) {
+        e.preventDefault();
+        redoLastAction();
+    }
+
     if (e.key === 'f' || e.key === 'F') { fitToScreen(); drawBg(); drawOverlay(); }
-    if (e.key === 'g' || e.key === 'G') {
-        state.showGrid = !state.showGrid;
-        drawOverlay();
-        setStatus(`Grid: ${state.showGrid ? 'ON' : 'OFF'}`);
-    }
+    if (e.key === 'g' || e.key === 'G') { state.showGrid = !state.showGrid; drawOverlay(); setStatus(`Grid: ${state.showGrid ? 'ON' : 'OFF'}`); }
+
     // Tool shortcuts
     if (e.key === 'c' || e.key === 'C') { setActiveTool('circle'); setStatus('Tool: Circle'); }
     if (e.key === 'r' || e.key === 'R') { setActiveTool('rectangle'); setStatus('Tool: Rectangle'); }
@@ -1275,122 +1297,133 @@ document.addEventListener('keydown', (e) => {
     if (e.key === 'l' || e.key === 'L') { setActiveTool('freeform'); setStatus('Tool: Freeform Lasso'); }
     if (e.key === 'd' || e.key === 'D') { toggleToolMode(); setStatus(`Mode: ${state.toolMode}`); }
 
+    // Arrow keys: navigate images
+    if (e.key === 'ArrowLeft') { e.preventDefault(); navigatePrev(); }
+    if (e.key === 'ArrowRight') { e.preventDefault(); navigateNext(); }
+
     if (e.key === 'Escape') {
-        if (state.polygonMode && state.polygonPoints.length > 0) {
-            state.polygonPoints = [];
-            drawOverlay();
-            setStatus('Polygon cancelled');
-            return;
-        }
-        if (state.isDrawingFreeform) {
-            state.isDrawingFreeform = false;
-            state.freeformPoints = [];
-            drawOverlay();
-            setStatus('Freeform cancelled');
-            return;
-        }
-        if (state.isDragging) {
-            state.isDragging = false;
-            drawOverlay();
-            setStatus('Drag cancelled');
-            return;
-        }
-        state.selectedId = null;
-        drawOverlay();
+        if (state.polygonMode && state.polygonPoints.length > 0) { state.polygonPoints = []; drawOverlay(); setStatus('Polygon cancelled'); return; }
+        if (state.isDrawingFreeform) { state.isDrawingFreeform = false; state.freeformPoints = []; drawOverlay(); setStatus('Freeform cancelled'); return; }
+        if (state.isDragging) { state.isDragging = false; drawOverlay(); setStatus('Drag cancelled'); return; }
+        state.selectedId = null; drawOverlay();
     }
-    if ((e.key === 's' || e.key === 'S') && (e.ctrlKey || e.metaKey)) {
-        e.preventDefault();
-        exportAnnotations('coco');
-    }
+
+    if ((e.key === 's' || e.key === 'S') && (e.ctrlKey || e.metaKey)) { e.preventDefault(); exportAnnotations('coco'); }
 });
 
 document.addEventListener('keyup', (e) => {
-    if (e.key === ' ') {
-        state.spaceHeld = false;
-        overlayCanvas.style.cursor = 'crosshair';
-    }
+    if (e.key === ' ') { state.spaceHeld = false; overlayCanvas.style.cursor = 'crosshair'; }
 });
 
-// Undo
+// ============================================================================
+// Undo / Redo
+// ============================================================================
 async function undoLastAction() {
-    if (state.undoStack.length === 0) {
-        setStatus('Nothing to undo');
-        return;
-    }
+    if (state.undoStack.length === 0) { setStatus('Nothing to undo'); return; }
     const action = state.undoStack.pop();
+
     if (action.action === 'add') {
-        // Undo add = remove it
-        await fetch(`/api/remove/${state.well}/${state.timepoint}/${action.annotation.id}`, {method: 'POST'});
+        await fetch(`/api/remove/${state.currentIndex}/${action.annotation.id}`, {method: 'POST'});
         state.annotations = state.annotations.filter(a => a.id !== action.annotation.id);
+        state.redoStack.push(action);
     } else if (action.action === 'remove') {
-        // Undo remove = re-add it via direct push (already removed from server, re-add)
-        const resp = await fetch('/api/add', {
+        // Re-add with original polygon (not bbox center)
+        const ann = action.annotation;
+        const resp = await fetch('/api/add_polygon', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({
-                well: state.well,
-                timepoint: state.timepoint,
-                x: action.annotation.bbox[0] + action.annotation.bbox[2] / 2,
-                y: action.annotation.bbox[1] + action.annotation.bbox[3] / 2,
-                class_id: action.annotation.category_id
+                index: state.currentIndex,
+                polygon: ann.segmentation[0],
+                class_id: ann.category_id
             })
         });
         const data = await resp.json();
         if (data.status === 'ok') {
             state.annotations.push(data.annotation);
+            // Update redo entry with new annotation (new ID from server)
+            state.redoStack.push({action: 'remove', annotation: data.annotation});
         }
     } else if (action.action === 'reclassify') {
-        await fetch(`/api/reclassify/${state.well}/${state.timepoint}/${action.annId}`, {
+        await fetch(`/api/reclassify/${state.currentIndex}/${action.annId}`, {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({class_id: action.oldClass})
         });
         const ann = state.annotations.find(a => a.id === action.annId);
         if (ann) ann.category_id = action.oldClass;
+        state.redoStack.push(action);
     }
-    drawOverlay();
-    updateStats();
+
+    drawOverlay(); updateStats(); markUnsaved();
+    updateUndoRedoButtons();
     setStatus('Undone last action');
 }
 
+async function redoLastAction() {
+    if (state.redoStack.length === 0) { setStatus('Nothing to redo'); return; }
+    const action = state.redoStack.pop();
+
+    if (action.action === 'add') {
+        // Redo add = re-add the annotation
+        const ann = action.annotation;
+        const resp = await fetch('/api/add_polygon', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                index: state.currentIndex,
+                polygon: ann.segmentation[0],
+                class_id: ann.category_id
+            })
+        });
+        const data = await resp.json();
+        if (data.status === 'ok') {
+            state.annotations.push(data.annotation);
+            state.undoStack.push({action: 'add', annotation: data.annotation});
+        }
+    } else if (action.action === 'remove') {
+        // Redo remove = remove it again
+        await fetch(`/api/remove/${state.currentIndex}/${action.annotation.id}`, {method: 'POST'});
+        state.annotations = state.annotations.filter(a => a.id !== action.annotation.id);
+        state.undoStack.push(action);
+    } else if (action.action === 'reclassify') {
+        await fetch(`/api/reclassify/${state.currentIndex}/${action.annId}`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({class_id: action.newClass})
+        });
+        const ann = state.annotations.find(a => a.id === action.annId);
+        if (ann) ann.category_id = action.newClass;
+        state.undoStack.push(action);
+    }
+
+    drawOverlay(); updateStats(); markUnsaved();
+    updateUndoRedoButtons();
+    setStatus('Redone action');
+}
+
 document.getElementById('undo-btn').addEventListener('click', undoLastAction);
+document.getElementById('redo-btn').addEventListener('click', redoLastAction);
 
 // ============================================================================
 // Dynamic label system
 // ============================================================================
-
-// Fetch label config from server and build the UI
 async function fetchLabels() {
     try {
         const resp = await fetch('/api/labels');
         const data = await resp.json();
-
-        // Build classConfig from server data
         classConfig = {};
-        for (const label of data.labels) {
-            classConfig[label.id] = { name: label.name, color: label.color };
-        }
-
-        renderClassButtons();
-        renderStatsPanel();
-
-        // Set activeClass to first available class
+        for (const label of data.labels) classConfig[label.id] = { name: label.name, color: label.color };
+        renderClassButtons(); renderStatsPanel();
         const ids = Object.keys(classConfig).map(Number).sort((a, b) => a - b);
-        if (ids.length > 0 && !(state.activeClass in classConfig)) {
-            state.activeClass = ids[0];
-        }
-    } catch (err) {
-        console.error('Failed to fetch labels:', err);
-    }
+        if (ids.length > 0 && !(state.activeClass in classConfig)) state.activeClass = ids[0];
+    } catch (err) { console.error('Failed to fetch labels:', err); }
 }
 
-// Build class buttons dynamically from classConfig
 function renderClassButtons() {
-    const container = document.getElementById('class-buttons');
-    container.innerHTML = '';
-
+    const cont = document.getElementById('class-buttons');
+    cont.innerHTML = '';
     const sortedIds = Object.keys(classConfig).map(Number).sort((a, b) => a - b);
-
     sortedIds.forEach((id, idx) => {
         const cfg = classConfig[id];
         const btn = document.createElement('div');
@@ -1398,314 +1431,189 @@ function renderClassButtons() {
         btn.id = `class-btn-${id}`;
         btn.dataset.class = id;
         btn.style.background = cfg.color;
-        // Use dark text on light colors (yellow, lime, etc.)
         btn.style.color = isLightColor(cfg.color) ? '#333' : '#fff';
         btn.textContent = `${idx + 1}: ${cfg.name}`;
-
-        // Left-click: select this class
         btn.addEventListener('click', () => {
             state.activeClass = id;
             document.querySelectorAll('.class-btn').forEach(b => b.classList.remove('active'));
             btn.classList.add('active');
         });
-
-        // Right-click: open context menu
-        btn.addEventListener('contextmenu', (e) => {
-            e.preventDefault();
-            showClassContextMenu(e.clientX, e.clientY, id);
-        });
-
-        container.appendChild(btn);
+        btn.addEventListener('contextmenu', (e) => { e.preventDefault(); showClassContextMenu(e.clientX, e.clientY, id); });
+        cont.appendChild(btn);
     });
-
-    // "+" button to add a new class
     const addBtn = document.createElement('div');
-    addBtn.className = 'add-class-btn';
-    addBtn.textContent = '+';
-    addBtn.title = 'Add new class';
+    addBtn.className = 'add-class-btn'; addBtn.textContent = '+'; addBtn.title = 'Add new class';
     addBtn.addEventListener('click', addNewClass);
-    container.appendChild(addBtn);
+    cont.appendChild(addBtn);
 }
 
-// Build stats panel rows dynamically
 function renderStatsPanel() {
-    const container = document.getElementById('class-stats');
-    container.innerHTML = '';
-
+    const cont = document.getElementById('class-stats');
+    cont.innerHTML = '';
     const sortedIds = Object.keys(classConfig).map(Number).sort((a, b) => a - b);
     for (const id of sortedIds) {
         const cfg = classConfig[id];
-        const row = document.createElement('div');
-        row.className = 'stat-row';
+        const row = document.createElement('div'); row.className = 'stat-row';
         row.innerHTML = `<span class="stat-label">${cfg.name}:</span><span class="stat-value" id="stat-class-${id}" style="color:${cfg.color};">-</span>`;
-        container.appendChild(row);
+        cont.appendChild(row);
     }
 }
 
-// Helper: determine if a hex color is "light" (for text contrast)
 function isLightColor(hex) {
-    const r = parseInt(hex.slice(1, 3), 16);
-    const g = parseInt(hex.slice(3, 5), 16);
-    const b = parseInt(hex.slice(5, 7), 16);
-    // Perceived brightness formula
-    const brightness = (r * 299 + g * 587 + b * 114) / 1000;
-    return brightness > 160;
+    const r = parseInt(hex.slice(1, 3), 16), g = parseInt(hex.slice(3, 5), 16), b = parseInt(hex.slice(5, 7), 16);
+    return (r * 299 + g * 587 + b * 114) / 1000 > 160;
 }
 
-// Right-click context menu for class buttons
 function showClassContextMenu(x, y, classId) {
-    // Remove any existing menu
     closeContextMenu();
-
     const menu = document.createElement('div');
-    menu.className = 'context-menu';
-    menu.id = 'class-context-menu';
-    menu.style.left = x + 'px';
-    menu.style.top = y + 'px';
+    menu.className = 'context-menu'; menu.id = 'class-context-menu';
+    menu.style.left = x + 'px'; menu.style.top = y + 'px';
 
-    // Rename option
-    const renameItem = document.createElement('div');
-    renameItem.className = 'context-menu-item';
-    renameItem.textContent = 'Rename...';
-    renameItem.addEventListener('click', () => { closeContextMenu(); renameClass(classId); });
-    menu.appendChild(renameItem);
+    const renameItem = document.createElement('div'); renameItem.className = 'context-menu-item'; renameItem.textContent = 'Rename...';
+    renameItem.addEventListener('click', () => { closeContextMenu(); renameClass(classId); }); menu.appendChild(renameItem);
 
-    // Change color option
-    const colorItem = document.createElement('div');
-    colorItem.className = 'context-menu-item';
-    colorItem.textContent = 'Change color...';
-    colorItem.addEventListener('click', () => { closeContextMenu(); changeClassColor(classId); });
-    menu.appendChild(colorItem);
+    const colorItem = document.createElement('div'); colorItem.className = 'context-menu-item'; colorItem.textContent = 'Change color...';
+    colorItem.addEventListener('click', () => { closeContextMenu(); changeClassColor(classId); }); menu.appendChild(colorItem);
 
-    // Remove option (only if more than 1 class)
     if (Object.keys(classConfig).length > 1) {
-        const removeItem = document.createElement('div');
-        removeItem.className = 'context-menu-item danger';
-        removeItem.textContent = 'Remove class';
-        removeItem.addEventListener('click', () => { closeContextMenu(); removeClass(classId); });
-        menu.appendChild(removeItem);
+        const removeItem = document.createElement('div'); removeItem.className = 'context-menu-item danger'; removeItem.textContent = 'Remove class';
+        removeItem.addEventListener('click', () => { closeContextMenu(); removeClass(classId); }); menu.appendChild(removeItem);
     }
 
     document.body.appendChild(menu);
-
-    // Close menu when clicking elsewhere
-    setTimeout(() => {
-        document.addEventListener('click', closeContextMenu, { once: true });
-    }, 10);
+    setTimeout(() => { document.addEventListener('click', closeContextMenu, { once: true }); }, 10);
 }
 
-function closeContextMenu() {
-    const menu = document.getElementById('class-context-menu');
-    if (menu) menu.remove();
-}
+function closeContextMenu() { const menu = document.getElementById('class-context-menu'); if (menu) menu.remove(); }
 
-// Rename a class -- prompts for new name, sends to server
 async function renameClass(classId) {
     const oldName = classConfig[classId].name;
     const newName = prompt(`Rename "${oldName}" to:`, oldName);
     if (!newName || newName.trim() === '' || newName === oldName) return;
-
     try {
-        const resp = await fetch('/api/labels/rename', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ id: classId, new_name: newName.trim() })
-        });
+        const resp = await fetch('/api/labels/rename', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ id: classId, new_name: newName.trim() }) });
         const data = await resp.json();
-        if (data.status === 'ok') {
-            classConfig[classId].name = data.new_name;
-            renderClassButtons();
-            renderStatsPanel();
-            updateStats();
-            setStatus(`Renamed "${data.old_name}" to "${data.new_name}"`);
-        } else {
-            setStatus(`Error: ${data.error}`);
-        }
-    } catch (err) {
-        setStatus(`Error: ${err.message}`);
-    }
+        if (data.status === 'ok') { classConfig[classId].name = data.new_name; renderClassButtons(); renderStatsPanel(); updateStats(); setStatus(`Renamed "${data.old_name}" to "${data.new_name}"`); }
+        else setStatus(`Error: ${data.error}`);
+    } catch (err) { setStatus(`Error: ${err.message}`); }
 }
 
-// Change class color -- uses browser's built-in color picker
 async function changeClassColor(classId) {
-    // Create a temporary hidden color input to use the browser's color picker
-    const input = document.createElement('input');
-    input.type = 'color';
-    input.value = classConfig[classId].color;
-    input.style.position = 'fixed';
-    input.style.opacity = '0';
-    document.body.appendChild(input);
-
+    const input = document.createElement('input'); input.type = 'color'; input.value = classConfig[classId].color;
+    input.style.position = 'fixed'; input.style.opacity = '0'; document.body.appendChild(input);
     input.addEventListener('change', async () => {
-        const newColor = input.value;
-        document.body.removeChild(input);
-
+        const newColor = input.value; document.body.removeChild(input);
         try {
-            const resp = await fetch('/api/labels/color', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ id: classId, color: newColor })
-            });
+            const resp = await fetch('/api/labels/color', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ id: classId, color: newColor }) });
             const data = await resp.json();
-            if (data.status === 'ok') {
-                classConfig[classId].color = newColor;
-                renderClassButtons();
-                renderStatsPanel();
-                drawOverlay();
-                setStatus(`Changed ${getClassName(classId)} color to ${newColor}`);
-            }
-        } catch (err) {
-            setStatus(`Error: ${err.message}`);
-        }
+            if (data.status === 'ok') { classConfig[classId].color = newColor; renderClassButtons(); renderStatsPanel(); drawOverlay(); setStatus(`Changed ${getClassName(classId)} color to ${newColor}`); }
+        } catch (err) { setStatus(`Error: ${err.message}`); }
     });
-
-    // If user cancels, clean up
-    input.addEventListener('blur', () => {
-        setTimeout(() => { if (document.body.contains(input)) document.body.removeChild(input); }, 200);
-    });
-
+    input.addEventListener('blur', () => { setTimeout(() => { if (document.body.contains(input)) document.body.removeChild(input); }, 200); });
     input.click();
 }
 
-// Remove a class
 async function removeClass(classId) {
-    const name = getClassName(classId);
-    if (!confirm(`Remove class "${name}"? Existing annotations with this class will keep their data but won't match a class name.`)) return;
-
+    if (!confirm(`Remove class "${getClassName(classId)}"?`)) return;
     try {
-        const resp = await fetch('/api/labels/remove', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ id: classId })
-        });
+        const resp = await fetch('/api/labels/remove', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ id: classId }) });
         const data = await resp.json();
         if (data.status === 'ok') {
             delete classConfig[classId];
-            // If active class was removed, switch to first available
-            if (state.activeClass === classId) {
-                const ids = Object.keys(classConfig).map(Number).sort((a, b) => a - b);
-                state.activeClass = ids[0];
-            }
-            renderClassButtons();
-            renderStatsPanel();
-            updateStats();
-            drawOverlay();
+            if (state.activeClass === classId) state.activeClass = Object.keys(classConfig).map(Number).sort((a, b) => a - b)[0];
+            renderClassButtons(); renderStatsPanel(); updateStats(); drawOverlay();
             setStatus(`Removed class "${data.removed_name}" (${data.affected_annotations} annotations affected)`);
-        } else {
-            setStatus(`Error: ${data.error}`);
-        }
-    } catch (err) {
-        setStatus(`Error: ${err.message}`);
-    }
+        } else setStatus(`Error: ${data.error}`);
+    } catch (err) { setStatus(`Error: ${err.message}`); }
 }
 
-// Add a new class
 async function addNewClass() {
     const name = prompt('New class name:');
     if (!name || name.trim() === '') return;
-
     try {
-        const resp = await fetch('/api/labels/add', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ name: name.trim() })
-        });
+        const resp = await fetch('/api/labels/add', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ name: name.trim() }) });
         const data = await resp.json();
-        if (data.status === 'ok') {
-            classConfig[data.id] = { name: data.name, color: data.color };
-            renderClassButtons();
-            renderStatsPanel();
-            setStatus(`Added class "${data.name}" (key: ${Object.keys(classConfig).length})`);
-        } else {
-            setStatus(`Error: ${data.error}`);
-        }
-    } catch (err) {
-        setStatus(`Error: ${err.message}`);
-    }
+        if (data.status === 'ok') { classConfig[data.id] = { name: data.name, color: data.color }; renderClassButtons(); renderStatsPanel(); setStatus(`Added class "${data.name}"`); }
+        else setStatus(`Error: ${data.error}`);
+    } catch (err) { setStatus(`Error: ${err.message}`); }
 }
 
-// Opacity slider
-document.getElementById('opacity-slider').addEventListener('input', (e) => {
-    state.opacity = e.target.value / 100;
-    drawOverlay();
+// ============================================================================
+// Event listeners
+// ============================================================================
+document.getElementById('opacity-slider').addEventListener('input', (e) => { state.opacity = e.target.value / 100; drawOverlay(); });
+document.getElementById('load-btn').addEventListener('click', () => {
+    const val = document.getElementById('image-select').value;
+    if (val !== '') loadImage(parseInt(val));
+});
+document.getElementById('save-btn').addEventListener('click', () => exportAnnotations('coco'));
+document.getElementById('prev-btn').addEventListener('click', navigatePrev);
+document.getElementById('next-btn').addEventListener('click', navigateNext);
+document.getElementById('image-select').addEventListener('change', (e) => {
+    if (e.target.value !== '') loadImage(parseInt(e.target.value));
 });
 
-// Buttons
-document.getElementById('load-btn').addEventListener('click', loadFrame);
-document.getElementById('save-btn').addEventListener('click', () => exportAnnotations('coco'));
+// Browse for image folder
+document.getElementById('browse-btn').addEventListener('click', async () => {
+    setStatus('Opening folder picker...');
+    try {
+        const resp = await fetch('/api/browse');
+        const data = await resp.json();
+        if (data.status === 'ok') {
+            state.imageList = data.images || [];
+            state.imageCount = data.count || 0;
+            const sel = document.getElementById('image-select');
+            sel.innerHTML = '';
+            for (const img of state.imageList) {
+                const opt = document.createElement('option');
+                opt.value = img.index;
+                opt.textContent = img.filename;
+                sel.appendChild(opt);
+            }
+            state.currentIndex = -1;
+            updateNavButtons();
+            setStatus(`Loaded ${data.count} images from ${data.path}`);
+            if (data.count > 0) loadImage(0);
+        } else {
+            setStatus('Folder selection cancelled');
+        }
+    } catch (e) { setStatus(`Error: ${e.message}`); }
+});
 
-// Export dropdown toggle + format selection
+// Export dropdown
 const exportBtn = document.getElementById('export-btn');
 const exportMenu = document.getElementById('export-menu');
-exportBtn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    exportMenu.style.display = exportMenu.style.display === 'none' ? 'block' : 'none';
-});
+exportBtn.addEventListener('click', (e) => { e.stopPropagation(); exportMenu.style.display = exportMenu.style.display === 'none' ? 'block' : 'none'; });
 exportMenu.querySelectorAll('.context-menu-item').forEach(item => {
-    item.addEventListener('click', (e) => {
-        e.stopPropagation();
-        exportMenu.style.display = 'none';
-        exportAnnotations(item.dataset.format);
-    });
+    item.addEventListener('click', (e) => { e.stopPropagation(); exportMenu.style.display = 'none'; exportAnnotations(item.dataset.format); });
 });
 document.addEventListener('click', () => { exportMenu.style.display = 'none'; });
 
-// Toolbar: shape tool buttons
-document.querySelectorAll('.tool-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-        setActiveTool(btn.dataset.tool);
-        setStatus(`Tool: ${btn.dataset.tool}`);
-    });
-});
-document.getElementById('mode-toggle-btn').addEventListener('click', () => {
-    toggleToolMode();
-    setStatus(`Mode: ${state.toolMode}`);
-});
-
-// Shape preset save button
+// Toolbar
+document.querySelectorAll('.tool-btn').forEach(btn => { btn.addEventListener('click', () => { setActiveTool(btn.dataset.tool); setStatus(`Tool: ${btn.dataset.tool}`); }); });
+document.getElementById('mode-toggle-btn').addEventListener('click', () => { toggleToolMode(); setStatus(`Mode: ${state.toolMode}`); });
 document.getElementById('save-preset-btn').addEventListener('click', savePreset);
 
-// Stamp param inputs: sync on change
+// Stamp param inputs
 ['stamp-radius', 'stamp-width', 'stamp-height', 'stamp-rx', 'stamp-ry'].forEach(id => {
-    const el = document.getElementById(id);
-    if (el) el.addEventListener('input', syncStampParams);
+    const el = document.getElementById(id); if (el) el.addEventListener('input', syncStampParams);
 });
 
-// Window resize
-window.addEventListener('resize', () => {
-    resizeCanvases();
-    drawBg();
-    drawOverlay();
-});
+window.addEventListener('resize', () => { resizeCanvases(); drawBg(); drawOverlay(); });
 
 // Semi-annotation support
 async function scanFolder() {
     const folder = document.getElementById('folder-input').value.trim();
-    if (!folder) {
-        setStatus('Paste a folder path first');
-        return;
-    }
-
+    if (!folder) { setStatus('Paste a folder path first'); return; }
     setStatus('Scanning folder...');
     try {
-        const resp = await fetch('/api/semiannotation/scan', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({folder: folder})
-        });
+        const resp = await fetch('/api/semiannotation/scan', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({folder: folder}) });
         const data = await resp.json();
-
-        if (data.error) {
-            setStatus(`Error: ${data.error}`);
-            return;
-        }
-
-        // Populate dropdown
-        const sel = document.getElementById('semi-select');
-        sel.innerHTML = '';
+        if (data.error) { setStatus(`Error: ${data.error}`); return; }
+        const sel = document.getElementById('semi-select'); sel.innerHTML = '';
         for (const frame of data.frames) {
-            const opt = document.createElement('option');
-            opt.value = frame;
+            const opt = document.createElement('option'); opt.value = frame;
             const match = frame.match(/_([KL]\d+)_.*_t(\d+)$/);
             opt.textContent = match ? `${match[1]} t${parseInt(match[2])}` : frame;
             sel.appendChild(opt);
@@ -1714,97 +1622,46 @@ async function scanFolder() {
         document.getElementById('load-semi-btn').style.display = 'block';
         document.getElementById('infer-semi-btn').style.display = 'block';
         setStatus(`Found ${data.frames.length} frames, ${data.n_annotations} annotations`);
-    } catch (e) {
-        setStatus(`Error: ${e.message}`);
-    }
-}
-
-async function loadSemiFrames() {
-    // Check if server was started with --semiannotation-dir
-    try {
-        const resp = await fetch('/api/semiannotation/list');
-        const data = await resp.json();
-        if (data.frames && data.frames.length > 0) {
-            document.getElementById('folder-input').value = data.dir;
-            const sel = document.getElementById('semi-select');
-            sel.innerHTML = '';
-            for (const frame of data.frames) {
-                const opt = document.createElement('option');
-                opt.value = frame;
-                const match = frame.match(/_([KL]\d+)_.*_t(\d+)$/);
-                opt.textContent = match ? `${match[1]} t${parseInt(match[2])}` : frame;
-                sel.appendChild(opt);
-            }
-            sel.style.display = 'block';
-            document.getElementById('load-semi-btn').style.display = 'block';
-            document.getElementById('infer-semi-btn').style.display = 'block';
-        }
-    } catch (e) {
-        console.log('No semi-annotations pre-loaded');
-    }
+    } catch (e) { setStatus(`Error: ${e.message}`); }
 }
 
 document.getElementById('scan-folder-btn').addEventListener('click', scanFolder);
-
-// Browse folder: open native OS file explorer, then auto-scan
 document.getElementById('browse-folder-btn').addEventListener('click', async () => {
     setStatus('Opening folder picker...');
     try {
         const resp = await fetch('/api/browse_folder');
         const data = await resp.json();
-        if (data.status === 'ok' && data.path) {
-            document.getElementById('folder-input').value = data.path;
-            scanFolder();
-        } else {
-            setStatus('Folder selection cancelled');
-        }
-    } catch (e) {
-        setStatus(`Error: ${e.message}`);
-    }
+        if (data.status === 'ok' && data.path) { document.getElementById('folder-input').value = data.path; scanFolder(); }
+        else setStatus('Folder selection cancelled');
+    } catch (e) { setStatus(`Error: ${e.message}`); }
 });
-// Also scan on Enter key in folder input
-document.getElementById('folder-input').addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') scanFolder();
-});
+document.getElementById('folder-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') scanFolder(); });
 
 async function loadSemiFrame() {
     const frameKey = document.getElementById('semi-select').value;
     if (!frameKey) return;
-
-    state.well = 'semi';
-    state.timepoint = frameKey;
+    // Set index to a special value for semi-annotation mode
+    state.currentIndex = -1;
     setStatus('Loading semi-annotated frame...');
     document.getElementById('loading').style.display = 'block';
     document.getElementById('loading').textContent = 'Loading pre-annotations...';
-
-    // Load image
     const img = new Image();
     img.onload = async () => {
-        state.bgImage = img;
-        state.imgWidth = img.width;
-        state.imgHeight = img.height;
-        resizeCanvases();
-        fitToScreen();
-        drawBg();
-
-        // Load pre-annotations
+        state.bgImage = img; state.imgWidth = img.width; state.imgHeight = img.height;
+        resizeCanvases(); fitToScreen(); drawBg();
         try {
             const resp = await fetch(`/api/semiannotation/load/${frameKey}`);
             const data = await resp.json();
             state.annotations = data.annotations || [];
-            state.undoStack = [];
+            state.undoStack = []; state.redoStack = [];
+            updateUndoRedoButtons();
             updateSaveIndicator('saved');
-            // Re-fetch labels in case importing created new classes
             await fetchLabels();
-            drawOverlay();
-            updateStats();
+            drawOverlay(); updateStats();
             setStatus(`Loaded: ${state.annotations.length} pre-annotations`);
-            await checkAutosaveRecovery();
-        } catch (e) {
-            setStatus(`Error: ${e.message}`);
-        }
+        } catch (e) { setStatus(`Error: ${e.message}`); }
         document.getElementById('loading').style.display = 'none';
-        document.getElementById('loading').textContent = 'Running inference...';
+        document.getElementById('loading').textContent = 'Loading...';
     };
     img.src = `/api/semiannotation/frame/${frameKey}?t=${Date.now()}`;
 }
@@ -1814,41 +1671,28 @@ document.getElementById('load-semi-btn').addEventListener('click', loadSemiFrame
 async function inferSemiFrame() {
     const frameKey = document.getElementById('semi-select').value;
     if (!frameKey) return;
-
-    state.well = 'semi';
-    state.timepoint = frameKey;
+    state.currentIndex = -1;
     setStatus('Running inference on frame...');
     document.getElementById('loading').style.display = 'block';
     document.getElementById('loading').textContent = 'Running inference...';
-
-    // Load image
     const img = new Image();
     img.onload = async () => {
-        state.bgImage = img;
-        state.imgWidth = img.width;
-        state.imgHeight = img.height;
-        resizeCanvases();
-        fitToScreen();
-        drawBg();
-
-        // Run inference (replaces existing annotations)
+        state.bgImage = img; state.imgWidth = img.width; state.imgHeight = img.height;
+        resizeCanvases(); fitToScreen(); drawBg();
         try {
             const resp = await fetch(`/api/semiannotation/infer/${frameKey}`);
             const data = await resp.json();
-            if (data.error) {
-                setStatus(`Error: ${data.error}`);
-            } else {
+            if (data.error) { setStatus(`Error: ${data.error}`); }
+            else {
                 state.annotations = data.annotations || [];
-                state.undoStack = [];
-                drawOverlay();
-                updateStats();
+                state.undoStack = []; state.redoStack = [];
+                updateUndoRedoButtons();
+                drawOverlay(); updateStats();
                 setStatus(`Inference done: ${state.annotations.length} detections (${data.inference_time}s)`);
             }
-        } catch (e) {
-            setStatus(`Error: ${e.message}`);
-        }
+        } catch (e) { setStatus(`Error: ${e.message}`); }
         document.getElementById('loading').style.display = 'none';
-        document.getElementById('loading').textContent = 'Running inference...';
+        document.getElementById('loading').textContent = 'Loading...';
     };
     img.src = `/api/semiannotation/frame/${frameKey}?t=${Date.now()}`;
 }
@@ -1858,9 +1702,8 @@ document.getElementById('infer-semi-btn').addEventListener('click', inferSemiFra
 // ============================================================================
 // Init
 // ============================================================================
-fetchLabels();   // Load label config first (builds buttons, stats, colors)
-loadFrames();
-loadSemiFrames();
+fetchLabels();
+loadImages();
 </script>
 </body>
 </html>

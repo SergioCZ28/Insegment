@@ -6,6 +6,7 @@ meaning pip creates a small script that calls main() when you type `insegment`.
 
 Usage:
     insegment serve                          # annotation-only mode (no model)
+    insegment serve --image-dir ./images     # load a folder of images
     insegment serve --model mymod:MyModel    # with a custom model
     insegment serve --port 8080              # custom port
 """
@@ -61,6 +62,13 @@ def cmd_serve(args):
     """Start the annotation server."""
     from insegment.app import app, configure_app
 
+    # Handle deprecated --tiff-dir
+    image_dir = args.image_dir
+    if args.tiff_dir:
+        print("WARNING: --tiff-dir is deprecated. Use --image-dir instead.")
+        if not image_dir:
+            image_dir = args.tiff_dir
+
     # Load model if specified
     segmenter = None
     if args.model:
@@ -75,7 +83,7 @@ def cmd_serve(args):
 
     configure_app(
         segmenter=segmenter,
-        tiff_dir=args.tiff_dir,
+        image_dir=image_dir,
         output_dir=args.output_dir,
         cell_radius=args.cell_radius,
         semiannotation_dir=args.semiannotation_dir,
@@ -84,6 +92,9 @@ def cmd_serve(args):
     if segmenter is None:
         print("No model loaded -- running in annotation-only mode.")
         print("Use --model module:ClassName to enable model inference.")
+
+    if not image_dir:
+        print("No --image-dir specified -- use Browse Folder in the UI to load images.")
 
     print(f"Starting Insegment v{__version__} on http://localhost:{args.port}")
     app.run(host="0.0.0.0", port=args.port, debug=False)
@@ -122,10 +133,16 @@ def main():
         help="Path to model checkpoint file (passed to model constructor)",
     )
     serve_parser.add_argument(
+        "--image-dir",
+        type=str,
+        default=None,
+        help="Path to directory with image files (PNG, JPEG, TIFF, etc.)",
+    )
+    serve_parser.add_argument(
         "--tiff-dir",
         type=str,
         default=None,
-        help="Path to directory with transformed TIFF files",
+        help=argparse.SUPPRESS,  # Deprecated, hidden from help
     )
     serve_parser.add_argument(
         "--output-dir",
