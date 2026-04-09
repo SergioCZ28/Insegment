@@ -98,16 +98,28 @@ insegment serve --model my_module:MySegmenter --checkpoint model.pth
 
 ## Export Formats
 
-Currently exports to **COCO JSON** format. More formats (YOLO, CSV, Pascal VOC) coming soon.
+Pick a format from the **Export As...** menu, or hit `Ctrl+S` for the default (COCO JSON).
+
+| Format | Output file | Notes |
+|--------|-------------|-------|
+| **COCO JSON** | `*_annotations.json` | Industry standard, category IDs are 1-indexed |
+| **YOLO TXT** | `*_annotations.txt` | One line per bbox: `class cx cy w h` (normalized 0-1) |
+| **CSV** | `*_annotations.csv` | Flat table with class name, bbox, and area |
+| **Pascal VOC XML** | `*_annotations.xml` | Standard VOC detection format |
+| **LabelMe JSON** | `*_labelme.json` | For round-tripping through the [labelme](https://github.com/wkentaro/labelme) tool; uses polygon segmentation data when available, falls back to rectangle from the bbox otherwise |
+
+All exports are written to the output directory passed to `insegment serve` (default: current working directory).
 
 ## Roadmap
 
-- [ ] Customizable labels (rename, recolor, add/remove)
-- [ ] Multiple export formats (YOLO, CSV, VOC)
-- [ ] Annotation shapes (circle, rectangle, point, polygon)
-- [ ] Progress bar for model inference
-- [ ] Auto-save / persistence
+- [x] Customizable labels (rename, recolor, add/remove)
+- [x] Multiple export formats (COCO, YOLO, CSV, VOC, LabelMe)
+- [x] Annotation shapes (circle, rectangle, point, polygon)
+- [x] Progress bar for model inference
+- [x] Auto-save / persistence
 - [ ] Dark mode
+- [ ] Online learning (train while labeling)
+- [ ] Fix coordinate precision on the Canvas screen-to-image transform
 
 ## License
 

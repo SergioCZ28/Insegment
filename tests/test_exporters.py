@@ -36,6 +36,7 @@ import pytest
 from insegment.exporters import (
     export_coco,
     export_csv,
+    export_labelme,
     export_voc,
     export_yolo,
 )
@@ -374,3 +375,93 @@ class TestExportVoc:
         out = export_voc(ann_data, class_names, "img_001.png", 200, 100)
         # Should not raise.
         ET.fromstring(out)
+
+
+# ---------------------------------------------------------------------------
+# LabelMe
+# ---------------------------------------------------------------------------
+
+class TestExportLabelme:
+    def test_top_level_keys(self, ann_data, class_names):
+        out = export_labelme(ann_data, class_names, "img_001.png", 200, 100)
+        assert set(out.keys()) == {
+            "version", "flags", "shapes",
+            "imagePath", "imageData", "imageHeight", "imageWidth",
+        }
+
+    def test_image_metadata(self, ann_data, class_names):
+        out = export_labelme(ann_data, class_names, "img_001.png", 200, 100)
+        assert out["imagePath"] == "img_001.png"
+        assert out["imageWidth"] == 200
+        assert out["imageHeight"] == 100
+        assert out["imageData"] is None
+
+    def test_version_is_string(self, ann_data, class_names):
+        out = export_labelme(ann_data, class_names, "img_001.png", 200, 100)
+        assert isinstance(out["version"], str)
+        # Should follow labelme's semver-ish format (e.g. "5.4.1").
+        assert out["version"].count(".") >= 1
+
+    def test_top_level_flags_is_dict(self, ann_data, class_names):
+        out = export_labelme(ann_data, class_names, "img_001.png", 200, 100)
+        assert out["flags"] == {}
+
+    def test_shapes_count(self, ann_data, class_names):
+        out = export_labelme(ann_data, class_names, "img_001.png", 200, 100)
+        assert len(out["shapes"]) == 2
+
+    def test_polygon_shape_fields(self, ann_data, class_names):
+        out = export_labelme(ann_data, class_names, "img_001.png", 200, 100)
+        shape = out["shapes"][0]
+        assert shape["label"] == "cell"
+        assert shape["shape_type"] == "polygon"
+        assert shape["group_id"] is None
+        assert shape["flags"] == {}
+        assert shape["description"] == ""
+
+    def test_polygon_points_are_xy_pairs(self, ann_data, class_names):
+        out = export_labelme(ann_data, class_names, "img_001.png", 200, 100)
+        # segmentation = [[10, 20, 40, 20, 40, 60, 10, 60]]
+        # -> points = [[10,20],[40,20],[40,60],[10,60]]
+        assert out["shapes"][0]["points"] == [
+            [10, 20], [40, 20], [40, 60], [10, 60],
+        ]
+
+    def test_labels_come_from_class_names(self, ann_data, class_names):
+        out = export_labelme(ann_data, class_names, "img_001.png", 200, 100)
+        labels = [s["label"] for s in out["shapes"]]
+        assert labels == ["cell", "debris"]
+
+    def test_class_name_fallback_for_unknown_id(self, ann_data):
+        out = export_labelme(ann_data, {0: "cell"}, "img.png", 200, 100)
+        labels = [s["label"] for s in out["shapes"]]
+        assert labels == ["cell", "class-1"]
+
+    def test_rectangle_fallback_when_no_segmentation(self, class_names):
+        data = {
+            "annotations": [{
+                "id": 0,
+                "category_id": 0,
+                "bbox": [10.0, 20.0, 30.0, 40.0],
+                "area": 1200.0,
+                "segmentation": [],
+            }],
+        }
+        out = export_labelme(data, class_names, "img.png", 200, 100)
+        shape = out["shapes"][0]
+        assert shape["shape_type"] == "rectangle"
+        # Two corner points: top-left and bottom-right.
+        assert shape["points"] == [[10.0, 20.0], [40.0, 60.0]]
+
+    def test_empty_annotations(self, empty_ann_data, class_names):
+        out = export_labelme(empty_ann_data, class_names, "blank.png", 64, 32)
+        assert out["shapes"] == []
+        assert out["imagePath"] == "blank.png"
+        assert out["imageHeight"] == 32
+        assert out["imageWidth"] == 64
+
+    def test_is_json_serializable(self, ann_data, class_names):
+        import json
+        out = export_labelme(ann_data, class_names, "img_001.png", 200, 100)
+        # Should not raise.
+        json.dumps(out)

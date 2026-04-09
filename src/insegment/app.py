@@ -1019,9 +1019,15 @@ def api_export(index):
     """Export annotations in the requested format (default: coco).
 
     Query params:
-        format: coco | yolo | csv | voc (default: coco)
+        format: coco | yolo | csv | voc | labelme (default: coco)
     """
-    from insegment.exporters import export_coco, export_yolo, export_csv, export_voc
+    from insegment.exporters import (
+        export_coco,
+        export_csv,
+        export_labelme,
+        export_voc,
+        export_yolo,
+    )
 
     if index not in STATE["annotations"]:
         return jsonify({"error": "No annotations to export"}), 400
@@ -1050,6 +1056,14 @@ def api_export(index):
         out_path = out_dir / f"{file_label}_annotations.xml"
         with open(out_path, "w") as f:
             f.write(content)
+    elif fmt == "labelme":
+        labelme = export_labelme(
+            ann_data, class_names, file_name,
+            ann_data["width"], ann_data["height"],
+        )
+        out_path = out_dir / f"{file_label}_labelme.json"
+        with open(out_path, "w") as f:
+            json.dump(labelme, f, indent=2)
     else:
         # Default: COCO JSON
         coco = export_coco(ann_data, class_names, file_name)
