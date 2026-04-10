@@ -92,6 +92,61 @@ def export_csv(ann_data, class_names, file_name):
     return buf.getvalue()
 
 
+def export_labelme(ann_data, class_names, file_name, img_width, img_height):
+    """Export annotations as LabelMe JSON.
+
+    Compatible with the labelme tool (github.com/wkentaro/labelme). Each
+    annotation becomes a 'polygon' shape built from its segmentation data,
+    or a 'rectangle' shape built from the bbox if no segmentation is
+    available.
+
+    Args:
+        ann_data: Internal annotation dict with 'annotations'.
+        class_names: {int: str} mapping of class IDs to names.
+        file_name: Image file name (used as imagePath).
+        img_width: Image width in pixels.
+        img_height: Image height in pixels.
+
+    Returns:
+        dict ready for json.dump().
+    """
+    shapes = []
+    for ann in ann_data["annotations"]:
+        label = class_names.get(
+            ann["category_id"], f"class-{ann['category_id']}"
+        )
+        segmentation = ann.get("segmentation") or []
+        if segmentation and segmentation[0]:
+            # Use the first polygon; convert flat [x1,y1,x2,y2,...]
+            # into LabelMe's [[x1,y1],[x2,y2],...] shape.
+            flat = segmentation[0]
+            points = [[flat[i], flat[i + 1]] for i in range(0, len(flat), 2)]
+            shape_type = "polygon"
+        else:
+            # No polygon -- fall back to a rectangle from the bbox.
+            # LabelMe rectangles are two corner points.
+            bx, by, bw, bh = ann["bbox"]
+            points = [[bx, by], [bx + bw, by + bh]]
+            shape_type = "rectangle"
+        shapes.append({
+            "label": label,
+            "points": points,
+            "group_id": None,
+            "description": "",
+            "shape_type": shape_type,
+            "flags": {},
+        })
+    return {
+        "version": "5.4.1",
+        "flags": {},
+        "shapes": shapes,
+        "imagePath": file_name,
+        "imageData": None,
+        "imageHeight": img_height,
+        "imageWidth": img_width,
+    }
+
+
 def export_voc(ann_data, class_names, file_name, img_width, img_height):
     """Export annotations as Pascal VOC XML.
 

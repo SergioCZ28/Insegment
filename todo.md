@@ -19,12 +19,12 @@ Remaining:
 The cloud VM has no display, no GPU and no local images. Good fit: backend, refactor, tests, docs.
 
 - [x] Unit tests for `exporters/` (COCO, YOLO, CSV, VOC) — first task
+- [x] Add a new export format (LabelMe JSON) + tests + README update
 - [ ] Refactor `app.py` (1429 lines, STATE god-object) into smaller modules: `state.py`, `routes_labels.py`, `routes_annotations.py`, etc.
 - [ ] Add API input validation on the JSON endpoints (pydantic or manual) with clear error messages
 - [ ] Replace `print()` calls with proper `logging` and add a `--verbose` CLI flag
 - [ ] Tests for polygon/shape generators (pure math)
-- [ ] Expand README with screenshots, install instructions, example workflow
-- [ ] Add a new export format (e.g. LabelMe JSON, KITTI)
+- [ ] Expand README with screenshots and example workflow (install/formats already covered)
 
 ## Local-only tasks (do NOT assign to cloud VM)
 
