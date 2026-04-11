@@ -6,6 +6,7 @@ This module defines the Flask web application. It is started by the CLI
 
 import io
 import json
+import logging
 import math
 import queue
 import threading
@@ -23,6 +24,7 @@ from insegment.models.base import SegmentationResult
 # Flask app
 # ---------------------------------------------------------------------------
 app = Flask(__name__)
+logger = logging.getLogger(__name__)
 
 # A palette of 10 visually distinct colors. When a user adds a new class,
 # it automatically gets the next color from this list (cycling back to the
@@ -104,7 +106,7 @@ def _scan_image_dir(directory):
     """Scan a directory for image files and populate STATE['images']."""
     directory = Path(directory)
     if not directory.exists():
-        print(f"WARNING: Image directory not found: {directory}")
+        logger.warning("Image directory not found: %s", directory)
         return
 
     images = []
@@ -122,7 +124,7 @@ def _scan_image_dir(directory):
         k: v for k, v in STATE["annotations"].items()
         if not isinstance(k, int)
     }
-    print(f"Loaded {len(images)} images from {directory}")
+    logger.info("Loaded %d images from %s", len(images), directory)
 
 
 def _load_semiannotation_dir(semi_dir):
@@ -130,7 +132,7 @@ def _load_semiannotation_dir(semi_dir):
     semi_dir = Path(semi_dir)
     coco_file = semi_dir / "_annotations.coco.json"
     if not coco_file.exists():
-        print(f"WARNING: No _annotations.coco.json in {semi_dir}")
+        logger.warning("No _annotations.coco.json in %s", semi_dir)
         return
 
     STATE["semiannotation_dir"] = str(semi_dir)
@@ -148,9 +150,9 @@ def _load_semiannotation_dir(semi_dir):
                 "height": img["height"],
             }
     STATE["semiannotation_frames"] = frames
-    print(f"Semi-annotations: {len(frames)} frames from {semi_dir}")
+    logger.info("Semi-annotations: %d frames from %s", len(frames), semi_dir)
     for k in frames:
-        print(f"  - {k}")
+        logger.debug("  - %s", k)
 
 
 # ---------------------------------------------------------------------------
@@ -208,7 +210,7 @@ def build_category_map(coco_categories):
             STATE["class_colors"][next_id] = DEFAULT_COLORS[next_id % len(DEFAULT_COLORS)]
             name_to_id[name] = next_id
             cat_map[coco_id] = next_id
-            print(f"  Auto-created class: {name} (id={next_id})")
+            logger.info("Auto-created class: %s (id=%d)", name, next_id)
 
     return cat_map
 

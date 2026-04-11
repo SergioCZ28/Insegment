@@ -13,9 +13,12 @@ Usage:
 
 import argparse
 import importlib
+import logging
 import sys
 
 from insegment import __version__
+
+logger = logging.getLogger(__name__)
 
 
 def load_model_class(model_string):
@@ -34,8 +37,8 @@ def load_model_class(model_string):
     gunicorn (another web server) for loading apps.
     """
     if ":" not in model_string:
-        print(f"Error: Model must be in 'module:ClassName' format, got '{model_string}'")
-        print("Example: insegment serve --model my_models:MySegmenter")
+        logger.error("Model must be in 'module:ClassName' format, got '%s'", model_string)
+        logger.error("Example: insegment serve --model my_models:MySegmenter")
         sys.exit(1)
 
     module_path, class_name = model_string.rsplit(":", 1)
@@ -43,16 +46,16 @@ def load_model_class(model_string):
     try:
         module = importlib.import_module(module_path)
     except ImportError as e:
-        print(f"Error: Could not import module '{module_path}': {e}")
-        print("Make sure the module is installed or on your Python path.")
+        logger.error("Could not import module '%s': %s", module_path, e)
+        logger.error("Make sure the module is installed or on your Python path.")
         sys.exit(1)
 
     try:
         cls = getattr(module, class_name)
     except AttributeError:
-        print(f"Error: Module '{module_path}' has no class '{class_name}'")
+        logger.error("Module '%s' has no class '%s'", module_path, class_name)
         available = [x for x in dir(module) if not x.startswith("_")]
-        print(f"Available names: {', '.join(available)}")
+        logger.error("Available names: %s", ", ".join(available))
         sys.exit(1)
 
     return cls
@@ -62,10 +65,17 @@ def cmd_serve(args):
     """Start the annotation server."""
     from insegment.app import app, configure_app
 
+    # Configure logging
+    level = logging.DEBUG if args.verbose else logging.INFO
+    logging.basicConfig(
+        level=level,
+        format="%(levelname)s: %(message)s",
+    )
+
     # Handle deprecated --tiff-dir
     image_dir = args.image_dir
     if args.tiff_dir:
-        print("WARNING: --tiff-dir is deprecated. Use --image-dir instead.")
+        logger.warning("--tiff-dir is deprecated. Use --image-dir instead.")
         if not image_dir:
             image_dir = args.tiff_dir
 
@@ -77,9 +87,9 @@ def cmd_serve(args):
         kwargs = {}
         if args.checkpoint:
             kwargs["checkpoint_path"] = args.checkpoint
-        print(f"Loading model: {args.model}")
+        logger.info("Loading model: %s", args.model)
         segmenter = model_cls(**kwargs)
-        print(f"Model loaded. Classes: {segmenter.class_names}")
+        logger.info("Model loaded. Classes: %s", segmenter.class_names)
 
     configure_app(
         segmenter=segmenter,
@@ -90,13 +100,13 @@ def cmd_serve(args):
     )
 
     if segmenter is None:
-        print("No model loaded -- running in annotation-only mode.")
-        print("Use --model module:ClassName to enable model inference.")
+        logger.info("No model loaded -- running in annotation-only mode.")
+        logger.info("Use --model module:ClassName to enable model inference.")
 
     if not image_dir:
-        print("No --image-dir specified -- use Browse Folder in the UI to load images.")
+        logger.info("No --image-dir specified -- use Browse Folder in the UI to load images.")
 
-    print(f"Starting Insegment v{__version__} on http://localhost:{args.port}")
+    logger.info("Starting Insegment v%s on http://localhost:%d", __version__, args.port)
     app.run(host="0.0.0.0", port=args.port, debug=False)
 
 
@@ -167,6 +177,12 @@ def main():
         type=str,
         default=None,
         help="Path to semi-annotation directory (PNGs + _annotations.coco.json)",
+    )
+    serve_parser.add_argument(
+        "-v", "--verbose",
+        action="store_true",
+        default=False,
+        help="Enable verbose (DEBUG-level) logging output",
     )
     serve_parser.set_defaults(func=cmd_serve)
 
