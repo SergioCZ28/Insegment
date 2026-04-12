@@ -62,6 +62,27 @@ STATE = {
 _inference_jobs = {}
 
 
+def require_fields(data, *fields):
+    """Validate that required fields exist in request JSON data.
+
+    Returns (data_dict, None) on success, or (None, error_response) on failure.
+    Usage::
+
+        data, err = require_fields(request.json, "id", "name")
+        if err:
+            return err
+    """
+    if data is None:
+        return None, (jsonify({"error": "Request body must be JSON"}), 400)
+    missing = [f for f in fields if f not in data]
+    if missing:
+        return None, (
+            jsonify({"error": f"Missing required field(s): {', '.join(missing)}"}),
+            400,
+        )
+    return data, None
+
+
 def configure_app(
     segmenter=None,
     image_dir=None,
@@ -420,7 +441,9 @@ def api_labels_rename():
 
     Body: {"id": 0, "new_name": "single-cell"}
     """
-    data = request.json
+    data, err = require_fields(request.json, "id", "new_name")
+    if err:
+        return err
     class_id = data["id"]
     new_name = data["new_name"].strip()
 
@@ -446,8 +469,10 @@ def api_labels_add():
 
     Body: {"name": "mitotic", "color": "#ff00ff"}  (color is optional)
     """
-    data = request.json
-    name = data.get("name", "").strip()
+    data, err = require_fields(request.json, "name")
+    if err:
+        return err
+    name = data["name"].strip()
     if not name:
         return jsonify({"error": "Name is required"}), 400
 
@@ -471,7 +496,9 @@ def api_labels_remove():
 
     Body: {"id": 3}
     """
-    data = request.json
+    data, err = require_fields(request.json, "id")
+    if err:
+        return err
     class_id = data["id"]
 
     if class_id not in STATE["class_names"]:
@@ -504,7 +531,9 @@ def api_labels_color():
 
     Body: {"id": 0, "color": "#ff5722"}
     """
-    data = request.json
+    data, err = require_fields(request.json, "id", "color")
+    if err:
+        return err
     class_id = data["id"]
     color = data["color"]
 
@@ -884,7 +913,9 @@ def api_add():
     Accepts optional 'shape' and 'params' fields for different shape types.
     Defaults to circle with STATE["cell_radius"] when not specified.
     """
-    data = request.json
+    data, err = require_fields(request.json, "index", "x", "y")
+    if err:
+        return err
     index = data["index"]
     x = data["x"]
     y = data["y"]
@@ -931,10 +962,14 @@ def api_add():
 @app.route("/api/add_polygon", methods=["POST"])
 def api_add_polygon():
     """Add a new annotation with a custom polygon shape."""
-    data = request.json
+    data, err = require_fields(request.json, "index", "polygon")
+    if err:
+        return err
     index = data["index"]
     polygon = data["polygon"]
-    class_id = data.get("class_id", 1)
+    if not isinstance(polygon, list):
+        return jsonify({"error": "Field 'polygon' must be a list of coordinates"}), 400
+    class_id = data.get("class_id", 0)
 
     if index not in STATE["annotations"]:
         return jsonify({"error": "No annotations loaded for this image"}), 400
@@ -976,11 +1011,16 @@ def api_remove(index, ann_id):
 @app.route("/api/reclassify/<int:index>/<int:ann_id>", methods=["POST"])
 def api_reclassify(index, ann_id):
     """Change class of an annotation."""
-    data = request.json
+    data, err = require_fields(request.json, "class_id")
+    if err:
+        return err
     new_class = data["class_id"]
 
     if index not in STATE["annotations"]:
         return jsonify({"error": "No annotations loaded"}), 400
+
+    if new_class not in STATE["class_names"]:
+        return jsonify({"error": f"Class ID {new_class} not found"}), 404
 
     ann_data = STATE["annotations"][index]
     for ann in ann_data["annotations"]:
@@ -1085,8 +1125,10 @@ def api_export(index):
 @app.route("/api/autosave", methods=["POST"])
 def api_autosave():
     """Auto-save annotations to a recovery file."""
-    data = request.get_json()
-    index = data.get("index")
+    data, err = require_fields(request.get_json(), "index")
+    if err:
+        return err
+    index = data["index"]
 
     if index not in STATE["annotations"]:
         return jsonify({"error": "No annotations loaded"}), 400
@@ -1142,8 +1184,10 @@ def api_get_autosave(index):
 @app.route("/api/restore", methods=["POST"])
 def api_restore():
     """Bulk-load annotations (for autosave recovery)."""
-    data = request.get_json()
-    index = data.get("index")
+    data, err = require_fields(request.get_json(), "index")
+    if err:
+        return err
+    index = data["index"]
     annotations = data.get("annotations", [])
 
     if index not in STATE["annotations"]:
