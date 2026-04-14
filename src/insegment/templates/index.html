@@ -152,6 +152,8 @@ canvas { position: absolute; top: 0; left: 0; image-rendering: pixelated; }
         <div class="stat-row"><span class="stat-label">Manual:</span><span class="stat-value" id="stat-manual">-</span></div>
     </div>
 
+    <button id="run-inference-btn" style="background: #6a1b9a;">Run Model</button>
+
     <div id="save-status" style="display:flex; align-items:center; gap:6px; font-size:12px;">
         <span id="save-dot" style="width:8px; height:8px; border-radius:50%; background:#4caf50; display:inline-block;"></span>
         <span id="save-text">Saved</span>
@@ -432,6 +434,46 @@ function navigatePrev() {
 }
 function navigateNext() {
     if (state.currentIndex < state.imageCount - 1) loadImage(state.currentIndex + 1);
+}
+
+async function runModelOnCurrent() {
+    if (state.currentIndex < 0 || state.imageCount === 0) {
+        alert('No image loaded. Load a folder first.');
+        return;
+    }
+    if (!state.hasModel) {
+        alert('No model loaded. Start the server with --model <module>:<Class>.');
+        return;
+    }
+    if (state.annotations && state.annotations.length > 0) {
+        const ok = confirm(
+            `This image has ${state.annotations.length} annotations. ` +
+            `Running the model will REPLACE them with fresh predictions. ` +
+            `You can undo with Ctrl+Z. Continue?`
+        );
+        if (!ok) return;
+    }
+    setStatus('Running model...');
+    const btn = document.getElementById('run-inference-btn');
+    const orig = btn.textContent;
+    btn.textContent = 'Running...';
+    btn.disabled = true;
+    try {
+        const resp = await fetch(`/api/detections/${state.currentIndex}?force=1`);
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'Inference failed');
+        state.annotations = data.annotations || [];
+        markUnsaved();
+        drawOverlay();
+        updateStats();
+        setStatus(`Model produced ${state.annotations.length} detections in ${data.inference_time}s`);
+    } catch (e) {
+        alert(`Inference failed: ${e.message}`);
+        setStatus(`Error: ${e.message}`);
+    } finally {
+        btn.textContent = orig;
+        btn.disabled = false;
+    }
 }
 
 // ============================================================================
@@ -1549,6 +1591,7 @@ document.getElementById('load-btn').addEventListener('click', () => {
     if (val !== '') loadImage(parseInt(val));
 });
 document.getElementById('save-btn').addEventListener('click', () => exportAnnotations('coco'));
+document.getElementById('run-inference-btn').addEventListener('click', runModelOnCurrent);
 document.getElementById('prev-btn').addEventListener('click', navigatePrev);
 document.getElementById('next-btn').addEventListener('click', navigateNext);
 document.getElementById('image-select').addEventListener('change', (e) => {

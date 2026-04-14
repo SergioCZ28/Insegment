@@ -314,6 +314,40 @@ def polygon_bbox_area(flat_polygon):
     return bbox, round(area, 1)
 
 
+def _load_saved_annotations(index):
+    """Load previously saved annotations from `{file_label}_annotations.json`.
+
+    Returns a list of annotations (internal format) or None if no saved file.
+    """
+    if not STATE.get("output_dir"):
+        return None
+    if index < 0 or index >= len(STATE.get("images", [])):
+        return None
+    file_label = STATE["images"][index]["filename"]
+    saved_path = Path(STATE["output_dir"]) / f"{file_label}_annotations.json"
+    if not saved_path.exists():
+        return None
+    try:
+        with open(saved_path) as f:
+            coco = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        logger.warning("Failed to read saved annotations %s: %s", saved_path, e)
+        return None
+    annotations = []
+    for ann in coco.get("annotations", []):
+        annotations.append({
+            "id": ann["id"],
+            "category_id": ann["category_id"] - 1,  # COCO is 1-indexed
+            "bbox": ann["bbox"],
+            "area": ann["area"],
+            "segmentation": ann["segmentation"],
+            "score": 1.0,
+            "source": "manual",
+        })
+    logger.info("Loaded %d saved annotations for index %d", len(annotations), index)
+    return annotations
+
+
 def run_inference(index):
     """Run model inference on image at index and cache results."""
     if index in STATE["annotations"]:
@@ -329,14 +363,15 @@ def run_inference(index):
     if segmenter is None:
         # No model loaded -- return empty annotations (annotation-only mode)
         h, w = frame.shape[:2]
+        saved = _load_saved_annotations(index)
         result = {
             "index": index,
             "filename": filename,
             "width": w,
             "height": h,
-            "annotations": [],
+            "annotations": saved if saved is not None else [],
             "inference_time": 0,
-            "next_id": 0,
+            "next_id": (max((a["id"] for a in saved), default=-1) + 1) if saved else 0,
         }
         STATE["annotations"][index] = result
         return result
@@ -390,6 +425,11 @@ def run_inference(index):
         "inference_time": round(elapsed, 1),
         "next_id": n_detections,
     }
+
+    saved = _load_saved_annotations(index)
+    if saved is not None:
+        ann_result["annotations"] = saved
+        ann_result["next_id"] = max((a["id"] for a in saved), default=-1) + 1
 
     STATE["annotations"][index] = ann_result
     return ann_result
@@ -589,7 +629,65 @@ def api_image(index):
 
 @app.route("/api/detections/<int:index>")
 def api_detections(index):
-    """Run inference and return detections."""
+    """Run inference and return detections.
+
+    Query params:
+        force=1 -- bypass cache and saved-annotations override, run the model
+                   fresh. Requires a model to be loaded.
+    """
+    force = request.args.get("force") == "1"
+    if force:
+        if STATE.get("segmenter") is None:
+            return jsonify({"error": "No model loaded"}), 400
+        if index < 0 or index >= len(STATE.get("images", [])):
+            return jsonify({"error": "Invalid image index"}), 400
+        STATE["annotations"].pop(index, None)
+        # Run inference without the saved-annotations override
+        frame = load_image(index)
+        if frame is None:
+            return jsonify({"error": "Could not load image"}), 404
+        t0 = time.time()
+        seg_result = STATE["segmenter"].predict(frame)
+        elapsed = time.time() - t0
+        masks = seg_result.masks
+        if masks.ndim == 3:
+            masks = masks[0]
+        bboxes = seg_result.bboxes
+        class_ids = seg_result.class_ids
+        scores = seg_result.scores
+        annotations = []
+        n_detections = len(class_ids) if hasattr(class_ids, "__len__") else 0
+        for i in range(n_detections):
+            inst_mask = (masks == (i + 1)).astype(np.uint8)
+            if not inst_mask.any():
+                continue
+            polygon = mask_to_polygon(inst_mask)
+            if polygon is None:
+                continue
+            x1, y1, x2, y2 = bboxes[i]
+            bbox_xywh = [float(x1), float(y1), float(x2 - x1), float(y2 - y1)]
+            annotations.append({
+                "id": i,
+                "category_id": int(class_ids[i]),
+                "bbox": bbox_xywh,
+                "area": float(bbox_xywh[2] * bbox_xywh[3]),
+                "segmentation": [polygon],
+                "score": float(scores[i]),
+                "source": "model",
+            })
+        h, w = frame.shape[:2]
+        ann_result = {
+            "index": index,
+            "filename": STATE["images"][index]["filename"],
+            "width": w,
+            "height": h,
+            "annotations": annotations,
+            "inference_time": round(elapsed, 1),
+            "next_id": n_detections,
+        }
+        STATE["annotations"][index] = ann_result
+        return jsonify(ann_result)
+
     result = run_inference(index)
     if result is None:
         return jsonify({"error": "Could not process image"}), 404
