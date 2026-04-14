@@ -31,3 +31,9 @@ tasks/
 annotations_output/
 *.tiff
 *.nd2
+settings.local.json
+
+.claude
+
+CLAUDE.md
+.gitignore
