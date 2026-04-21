@@ -83,10 +83,14 @@ def cmd_serve(args):
     segmenter = None
     if args.model:
         model_cls = load_model_class(args.model)
-        # Pass checkpoint and any extra kwargs to the model constructor
+        # Pass checkpoint and any extra kwargs to the model constructor.
+        # Optional kwargs are only added when the user explicitly passes them,
+        # so they don't clash with adapters that don't accept them.
         kwargs = {}
         if args.checkpoint:
             kwargs["checkpoint_path"] = args.checkpoint
+        if args.min_area is not None:
+            kwargs["min_area"] = args.min_area
         logger.info("Loading model: %s", args.model)
         segmenter = model_cls(**kwargs)
         logger.info("Model loaded. Classes: %s", segmenter.class_names)
@@ -171,6 +175,17 @@ def main():
         type=int,
         default=4,
         help="Radius in pixels for manually added circle annotations (default: 4)",
+    )
+    serve_parser.add_argument(
+        "--min-area",
+        type=int,
+        default=None,
+        help=(
+            "Minimum mask area in pixels for model-predicted instances. "
+            "Passed to the adapter as min_area kwarg. BacDETR adapter "
+            "default is 20. Set to 0 to disable. Only takes effect if the "
+            "adapter accepts a min_area parameter."
+        ),
     )
     serve_parser.add_argument(
         "--semiannotation-dir",
