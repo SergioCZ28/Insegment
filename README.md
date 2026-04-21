@@ -118,7 +118,7 @@ Pick a format from the **Export As...** menu, or hit `Ctrl+S` for the default (C
 
 | Format | Output file | Notes |
 |--------|-------------|-------|
-| **COCO JSON** | `*_annotations.json` | Industry standard, category IDs are 1-indexed |
+| **COCO JSON** | `*_annotations.json` | Industry standard, category IDs are 0-indexed |
 | **YOLO TXT** | `*_annotations.txt` | One line per bbox: `class cx cy w h` (normalized 0-1) |
 | **CSV** | `*_annotations.csv` | Flat table with class name, bbox, and area |
 | **Pascal VOC XML** | `*_annotations.xml` | Standard VOC detection format |
