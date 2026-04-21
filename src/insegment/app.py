@@ -1059,7 +1059,12 @@ def api_add():
 
 @app.route("/api/add_polygon", methods=["POST"])
 def api_add_polygon():
-    """Add a new annotation with a custom polygon shape."""
+    """Add a new annotation with a custom polygon shape.
+
+    Expects polygon as a FLAT list of alternating x/y coordinates:
+        [x1, y1, x2, y2, x3, y3, ...]
+    NOT a list of [x, y] pairs.
+    """
     data, err = require_fields(request.json, "index", "polygon")
     if err:
         return err
@@ -1067,6 +1072,26 @@ def api_add_polygon():
     polygon = data["polygon"]
     if not isinstance(polygon, list):
         return jsonify({"error": "Field 'polygon' must be a list of coordinates"}), 400
+
+    # Validate flat polygon format: list of numbers, even count, >= 3 points
+    # (6 numbers). Previously this would 500 deep inside polygon_bbox_area
+    # if the caller passed list-of-pairs like [[x, y], [x, y], ...].
+    if not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in polygon):
+        return jsonify({
+            "error": (
+                "Field 'polygon' must be a FLAT list of numbers "
+                "[x1, y1, x2, y2, ...], not a list of pairs"
+            ),
+        }), 400
+    if len(polygon) < 6:
+        return jsonify({
+            "error": "Polygon needs at least 3 points (6 coordinates)",
+        }), 400
+    if len(polygon) % 2 != 0:
+        return jsonify({
+            "error": "Polygon coordinate list length must be even (x, y pairs)",
+        }), 400
+
     class_id = data.get("class_id", 0)
 
     if index not in STATE["annotations"]:
