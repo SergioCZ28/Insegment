@@ -23,13 +23,15 @@ Internal annotation shape (built in app.py around line 360):
         "next_id": int,
     }
 
-Note: COCO output is 1-indexed for category_id (the exporter adds +1),
-while YOLO / CSV / VOC pass the raw 0-indexed id through.
+Note: COCO output is 0-indexed for category_id (matching BacDETR /
+unified_annotations convention). All exporters pass the raw 0-indexed id
+through.
 """
 
 import csv
 import io
 import xml.etree.ElementTree as ET
+import zlib
 
 import pytest
 
@@ -40,6 +42,11 @@ from insegment.exporters import (
     export_voc,
     export_yolo,
 )
+
+
+def _expected_image_id(file_name):
+    """Mirror of exporters._stable_image_id for test assertions."""
+    return zlib.crc32(file_name.encode("utf-8")) & 0x7FFFFFFF
 
 
 # ---------------------------------------------------------------------------
@@ -103,20 +110,20 @@ class TestExportCoco:
     def test_image_entry(self, ann_data, class_names):
         out = export_coco(ann_data, class_names, "img_001.png")
         assert out["images"] == [{
-            "id": 0,
+            "id": _expected_image_id("img_001.png"),
             "file_name": "img_001.png",
             "width": 200,
             "height": 100,
         }]
 
-    def test_categories_are_one_indexed_and_sorted(self, ann_data):
+    def test_categories_are_zero_indexed_sorted_with_supercategory(self, ann_data):
         # Pass class names out of order to make sure the exporter sorts them.
         cn = {2: "third", 0: "first", 1: "second"}
         out = export_coco(ann_data, cn, "img.png")
         assert out["categories"] == [
-            {"id": 1, "name": "first"},
-            {"id": 2, "name": "second"},
-            {"id": 3, "name": "third"},
+            {"id": 0, "name": "first", "supercategory": "none"},
+            {"id": 1, "name": "second", "supercategory": "none"},
+            {"id": 2, "name": "third", "supercategory": "none"},
         ]
 
     def test_annotation_count(self, ann_data, class_names):
@@ -128,18 +135,18 @@ class TestExportCoco:
         first = out["annotations"][0]
         assert first == {
             "id": 0,
-            "image_id": 0,
-            "category_id": 1,  # 0-based internal -> 1-based COCO
+            "image_id": _expected_image_id("img_001.png"),
+            "category_id": 0,  # 0-indexed, passthrough from internal
             "bbox": [10.0, 20.0, 30.0, 40.0],
             "area": 1200.0,
             "segmentation": [[10, 20, 40, 20, 40, 60, 10, 60]],
             "iscrowd": 0,
         }
 
-    def test_category_id_offset(self, ann_data, class_names):
+    def test_category_id_is_zero_indexed_passthrough(self, ann_data, class_names):
         out = export_coco(ann_data, class_names, "img_001.png")
-        # Internal ids 0 and 1 -> COCO ids 1 and 2.
-        assert [a["category_id"] for a in out["annotations"]] == [1, 2]
+        # Internal ids 0 and 1 -> COCO ids 0 and 1 (no offset).
+        assert [a["category_id"] for a in out["annotations"]] == [0, 1]
 
     def test_annotation_ids_are_sequential(self, ann_data, class_names):
         # The exporter renumbers annotation ids by enumerate() position.
@@ -148,9 +155,19 @@ class TestExportCoco:
         out = export_coco(ann_data, class_names, "img_001.png")
         assert [a["id"] for a in out["annotations"]] == [0, 1]
 
-    def test_image_id_is_zero_for_all_annotations(self, ann_data, class_names):
+    def test_image_id_is_stable_crc_and_consistent(self, ann_data, class_names):
         out = export_coco(ann_data, class_names, "img_001.png")
-        assert all(a["image_id"] == 0 for a in out["annotations"])
+        expected = _expected_image_id("img_001.png")
+        # Every annotation shares the same image_id, matching images[0].id.
+        assert out["images"][0]["id"] == expected
+        assert all(a["image_id"] == expected for a in out["annotations"])
+
+    def test_image_id_differs_across_files(self, ann_data, class_names):
+        # Two exports with different filenames must produce different image_ids
+        # (the whole point of the change -- avoid collisions when merging).
+        a = export_coco(ann_data, class_names, "img_001.png")
+        b = export_coco(ann_data, class_names, "img_002.png")
+        assert a["images"][0]["id"] != b["images"][0]["id"]
 
     def test_iscrowd_always_zero(self, ann_data, class_names):
         out = export_coco(ann_data, class_names, "img_001.png")
@@ -161,8 +178,8 @@ class TestExportCoco:
         assert out["annotations"] == []
         assert out["images"][0]["file_name"] == "blank.png"
         assert out["categories"] == [
-            {"id": 1, "name": "cell"},
-            {"id": 2, "name": "debris"},
+            {"id": 0, "name": "cell", "supercategory": "none"},
+            {"id": 1, "name": "debris", "supercategory": "none"},
         ]
 
     def test_is_json_serializable(self, ann_data, class_names):

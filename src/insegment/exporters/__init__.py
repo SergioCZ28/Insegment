@@ -7,10 +7,32 @@ All share a common pattern: (ann_data, class_names, ...) -> content.
 import csv
 import io
 import xml.etree.ElementTree as ET
+import zlib
+
+
+def _stable_image_id(file_name):
+    """Deterministic int32 image_id derived from the filename.
+
+    We use zlib.crc32 (not Python's built-in hash) because hash() is
+    randomized across processes via PYTHONHASHSEED, which would produce
+    different image_ids on every run and break reproducibility. CRC32 is
+    deterministic, cross-process stable, and fits in a 32-bit int.
+    """
+    return zlib.crc32(file_name.encode("utf-8")) & 0x7FFFFFFF
 
 
 def export_coco(ann_data, class_names, file_name):
     """Build a COCO-format dict.
+
+    Category IDs are 0-indexed to match the internal representation and the
+    BacDETR / unified_annotations convention (0=single-cell, 1=clump,
+    2=debris). This differs from Roboflow's 1-indexed export; mismatched
+    indexing has caused silent class-swap bugs in downstream training.
+
+    Each category gets a `supercategory` field for strict COCO compliance.
+
+    `image_id` is a stable CRC32 of the filename so that merging multiple
+    single-image JSON exports does not produce id collisions.
 
     Args:
         ann_data: Internal annotation dict with 'annotations', 'width', 'height'.
@@ -21,12 +43,13 @@ def export_coco(ann_data, class_names, file_name):
         dict ready for json.dump().
     """
     categories = [
-        {"id": idx + 1, "name": name}
+        {"id": idx, "name": name, "supercategory": "none"}
         for idx, name in sorted(class_names.items())
     ]
+    image_id = _stable_image_id(file_name)
     return {
         "images": [{
-            "id": 0,
+            "id": image_id,
             "file_name": file_name,
             "width": ann_data["width"],
             "height": ann_data["height"],
@@ -35,8 +58,8 @@ def export_coco(ann_data, class_names, file_name):
         "annotations": [
             {
                 "id": i,
-                "image_id": 0,
-                "category_id": a["category_id"] + 1,
+                "image_id": image_id,
+                "category_id": a["category_id"],
                 "bbox": a["bbox"],
                 "area": a["area"],
                 "segmentation": a["segmentation"],
