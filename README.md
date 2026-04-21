@@ -4,6 +4,8 @@ Interactive instance segmentation annotation tool. Load microscopy images (or an
 
 Built for researchers who need fast, accurate annotations without the overhead of heavyweight labeling platforms.
 
+![Insegment overview -- the full annotation workspace with image loaded](docs/screenshots/01_overview.png)
+
 ## Features
 
 - **Model-agnostic**: Plug in any instance segmentation model via a simple Python adapter
@@ -41,10 +43,24 @@ Where `my_images/` contains PNG files and an `_annotations.coco.json` file.
 ### With a model
 
 ```bash
-insegment serve --model my_models:MySegmenter --checkpoint model.pth --tiff-dir ./data
+insegment serve --model my_models:MySegmenter --checkpoint model.pth --image-dir ./data
 ```
 
 Then open http://localhost:5000 in your browser.
+
+## UI tour
+
+**Click anywhere on a cell to drop a labelled annotation.** Shape tool and active class are set in the sidebar (default: circle, single-cell). Right-click a nearby annotation to delete it. Pan with Shift+drag, zoom with scroll.
+
+![Close-up of annotated S. aureus cocci -- green circles mark single-cell detections](docs/screenshots/02_annotated.png)
+
+The right-hand panel keeps running counts per class, separates **model** vs **manual** annotations so you can see how much correcting you're doing, and exposes the common actions:
+
+![Detection stats, Run Model, Save, Export, Undo/Redo](docs/screenshots/03_actions.png)
+
+Exports cover the formats most training pipelines consume:
+
+![Export dropdown: COCO JSON, YOLO TXT, CSV, Pascal VOC XML, LabelMe JSON](docs/screenshots/04_export.png)
 
 ## Writing a Model Adapter
 
@@ -118,8 +134,7 @@ All exports are written to the output directory passed to `insegment serve` (def
 - [x] Progress bar for model inference
 - [x] Auto-save / persistence
 - [ ] Dark mode
-- [ ] Online learning (train while labeling)
-- [ ] Fix coordinate precision on the Canvas screen-to-image transform
+- [ ] Online learning (train while labelling)
 
 ## License
 
