@@ -406,23 +406,20 @@ async function loadImage(index) {
         fitToScreen();
         drawBg();
 
-        // Run inference (with SSE if model, sync if not)
-        if (state.hasModel) {
-            await runInferenceSSE(index);
-        } else {
-            setStatus('Loading detections...');
-            try {
-                const resp = await fetch(`/api/detections/${index}`);
-                const data = await resp.json();
-                state.annotations = data.annotations || [];
-                updateSaveIndicator('saved');
-                drawOverlay();
-                updateStats();
-                setStatus(`Loaded: ${state.annotations.length} annotations`);
-                await checkAutosaveRecovery();
-            } catch (e) {
-                setStatus(`Error: ${e.message}`);
-            }
+        // Load saved annotations only -- no inference. Use "Run Model" to run it.
+        setStatus('Loading annotations...');
+        try {
+            const resp = await fetch(`/api/load/${index}`);
+            const data = await resp.json();
+            state.annotations = data.annotations || [];
+            updateSaveIndicator('saved');
+            drawOverlay();
+            updateStats();
+            const hint = state.hasModel ? ' (click Run Model to infer)' : '';
+            setStatus(`Loaded: ${state.annotations.length} annotations${hint}`);
+            await checkAutosaveRecovery();
+        } catch (e) {
+            setStatus(`Error: ${e.message}`);
         }
         document.getElementById('loading').style.display = 'none';
     };

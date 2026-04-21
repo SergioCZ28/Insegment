@@ -627,6 +627,36 @@ def api_image(index):
     return send_file(buf, mimetype="image/png")
 
 
+@app.route("/api/load/<int:index>")
+def api_load(index):
+    """Load image metadata + saved annotations WITHOUT running inference.
+
+    Used on image navigation so the model never fires unless the user
+    explicitly clicks "Run Model".
+    """
+    if index < 0 or index >= len(STATE.get("images", [])):
+        return jsonify({"error": "Invalid image index"}), 400
+    # Use cached STATE if available, otherwise build an empty-but-valid result.
+    if index in STATE["annotations"]:
+        return jsonify(STATE["annotations"][index])
+    frame = load_image(index)
+    if frame is None:
+        return jsonify({"error": "Could not load image"}), 404
+    h, w = frame.shape[:2]
+    saved = _load_saved_annotations(index)
+    result = {
+        "index": index,
+        "filename": STATE["images"][index]["filename"],
+        "width": w,
+        "height": h,
+        "annotations": saved if saved is not None else [],
+        "inference_time": 0,
+        "next_id": (max((a["id"] for a in saved), default=-1) + 1) if saved else 0,
+    }
+    STATE["annotations"][index] = result
+    return jsonify(result)
+
+
 @app.route("/api/detections/<int:index>")
 def api_detections(index):
     """Run inference and return detections.
