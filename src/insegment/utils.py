@@ -40,6 +40,24 @@ def require_fields(data, *fields):
     return data, None
 
 
+def _safe_coco_path(folder_path, file_name):
+    """Join a COCO `file_name` onto `folder_path`, rejecting anything that would
+    resolve outside `folder_path`.
+
+    Returns the resolved Path on success, or None if `file_name` is missing,
+    not a string, or escapes the folder.
+    """
+    if not isinstance(file_name, str) or not file_name:
+        return None
+    folder_path = Path(folder_path).resolve()
+    try:
+        candidate = (folder_path / file_name).resolve()
+        candidate.relative_to(folder_path)
+    except (ValueError, OSError):
+        return None
+    return candidate
+
+
 def _scan_image_dir(directory):
     """Scan a directory for image files and populate STATE['images']."""
     directory = Path(directory)
@@ -78,15 +96,17 @@ def _load_semiannotation_dir(semi_dir):
     with open(coco_file) as f:
         coco = json.load(f)
     for img in coco["images"]:
-        png_path = semi_dir / img["file_name"]
-        if png_path.exists():
-            name = img["file_name"].replace(".png", "")
-            frames[name] = {
-                "filename": img["file_name"],
-                "path": str(png_path),
-                "width": img["width"],
-                "height": img["height"],
-            }
+        png_path = _safe_coco_path(semi_dir, img.get("file_name"))
+        if png_path is None or not png_path.exists():
+            continue
+        filename = png_path.name
+        name = filename.replace(".png", "")
+        frames[name] = {
+            "filename": filename,
+            "path": str(png_path),
+            "width": img["width"],
+            "height": img["height"],
+        }
     STATE["semiannotation_frames"] = frames
     logger.info("Semi-annotations: %d frames from %s", len(frames), semi_dir)
     for k in frames:
