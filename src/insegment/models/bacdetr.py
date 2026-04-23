@@ -12,6 +12,7 @@ The `hitmictools` conda env must be active so HiTMicTools is importable.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -19,10 +20,7 @@ import numpy as np
 
 from .base import BaseSegmenter, SegmentationResult
 
-DEFAULT_CHECKPOINT = (
-    "C:/Users/sergi/ExperimentsWindows/e009_BacDETR/training/checkpoints/"
-    "checkpoint_best_v16b_ema.pth"
-)
+DEFAULT_CHECKPOINT = os.environ.get("BACDETR_CHECKPOINT", "")
 _CLASS_NAMES = {0: "single-cell", 1: "clump", 2: "debris"}
 
 
