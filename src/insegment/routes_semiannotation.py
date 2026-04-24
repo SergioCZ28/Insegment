@@ -14,7 +14,7 @@ from flask import Blueprint, jsonify, request, send_file
 from PIL import Image
 
 from insegment.state import STATE
-from insegment.utils import build_category_map, mask_to_polygon
+from insegment.utils import _safe_coco_path, build_category_map, mask_to_polygon
 
 bp = Blueprint("semiannotation", __name__)
 
@@ -85,15 +85,17 @@ def api_semiannotation_scan():
 
     frames = {}
     for img in coco.get("images", []):
-        png_path = folder_path / img["file_name"]
-        if png_path.exists():
-            name = img["file_name"].replace(".png", "")
-            frames[name] = {
-                "filename": img["file_name"],
-                "path": str(png_path),
-                "width": img["width"],
-                "height": img["height"],
-            }
+        png_path = _safe_coco_path(folder_path, img.get("file_name"))
+        if png_path is None or not png_path.exists():
+            continue
+        filename = png_path.name
+        name = filename.replace(".png", "")
+        frames[name] = {
+            "filename": filename,
+            "path": str(png_path),
+            "width": img["width"],
+            "height": img["height"],
+        }
 
     if not frames:
         return jsonify({"error": "No matching PNG files found for images in COCO JSON"}), 404
