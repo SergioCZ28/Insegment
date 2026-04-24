@@ -26,14 +26,7 @@ build/
 .DS_Store
 Thumbs.db
 
-# Project
-tasks/
+# Project outputs / inputs
 annotations_output/
 *.tiff
 *.nd2
-settings.local.json
-
-.claude
-
-CLAUDE.md
-.gitignore
