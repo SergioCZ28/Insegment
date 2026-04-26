@@ -46,6 +46,10 @@ Where `my_images/` contains PNG files and an `_annotations.coco.json` file.
 insegment serve --model my_models:MySegmenter --checkpoint model.pth --image-dir ./data
 ```
 
+Only load checkpoints from sources you trust. Many PyTorch-based adapters load
+checkpoint files with pickle-backed mechanisms such as `torch.load`, which can
+execute code embedded in a malicious file.
+
 Then open http://localhost:5000 in your browser.
 
 ## UI tour
