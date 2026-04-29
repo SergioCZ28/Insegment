@@ -388,6 +388,84 @@ class TestExportAndAutosave:
             f"Expected category_ids preserved as [0, 1, 2], got {ids}."
         )
 
+    # -- Defense-in-depth: drop annotations with stale category_ids --------
+    # Stale autosaves (server-side or browser localStorage) written by an
+    # older Insegment may contain category_ids that no longer exist (e.g.
+    # the off-by-one bug produced -1, or a class was deleted). Loading
+    # them silently makes the polygons render gray. Both the autosave-load
+    # path and /api/restore must filter them out so the UI only ever
+    # receives annotations whose class is currently defined.
+
+    def test_restore_drops_unknown_category_ids(self, client):
+        """POST /api/restore with -1 / 99 entries: dropped, only valid kept."""
+        _bootstrap(client)
+        payload = {
+            "index": 0,
+            "annotations": [
+                {"id": 0, "category_id": 0, "bbox": [0, 0, 1, 1],
+                 "area": 1.0, "segmentation": [[0, 0, 1, 0, 1, 1]]},
+                {"id": 1, "category_id": -1, "bbox": [0, 0, 1, 1],
+                 "area": 1.0, "segmentation": [[0, 0, 1, 0, 1, 1]]},
+                {"id": 2, "category_id": 99, "bbox": [0, 0, 1, 1],
+                 "area": 1.0, "segmentation": [[0, 0, 1, 0, 1, 1]]},
+                {"id": 3, "category_id": 1, "bbox": [0, 0, 1, 1],
+                 "area": 1.0, "segmentation": [[0, 0, 1, 0, 1, 1]]},
+            ],
+        }
+        resp = client.post("/api/restore", json=payload)
+        assert resp.status_code == 200
+        # /api/restore reports cleaned count, not posted count.
+        assert resp.get_json()["n_annotations"] == 2
+        stats = client.get("/api/stats/0").get_json()
+        assert stats["total"] == 2
+        assert stats["single-cell"] == 1
+        assert stats["clump"] == 1
+
+    def test_get_autosave_drops_unknown_category_ids(self, client, output_dir):
+        """A stale autosave file with -1 entries: served WITHOUT the -1s.
+
+        Reproduces the exact corruption Sergio's
+        Cip_..._p02_t00_autosave.json had: 558 entries with id -1
+        plus 1 with id 0. After the fix, GET /api/autosave/<idx>
+        returns only the valid entry.
+        """
+        _bootstrap(client)
+        # Hand-craft a corrupt autosave file mimicking pre-fix data.
+        file_label = "img_000"
+        corrupt = {
+            "images": [{"id": 1, "file_name": "img_000.png",
+                        "width": 40, "height": 32}],
+            "categories": [
+                {"id": 0, "name": "single-cell"},
+                {"id": 1, "name": "clump"},
+                {"id": 2, "name": "debris"},
+            ],
+            "annotations": [
+                {"id": 0, "image_id": 1, "category_id": 0,
+                 "bbox": [0, 0, 1, 1], "area": 1.0,
+                 "segmentation": [[0, 0, 1, 0, 1, 1]], "iscrowd": 0},
+                # Two -1 entries that would render as gray. The bug
+                # produced these on every reload pre-fix.
+                {"id": 1, "image_id": 1, "category_id": -1,
+                 "bbox": [0, 0, 1, 1], "area": 1.0,
+                 "segmentation": [[0, 0, 1, 0, 1, 1]], "iscrowd": 0},
+                {"id": 2, "image_id": 1, "category_id": -1,
+                 "bbox": [0, 0, 1, 1], "area": 1.0,
+                 "segmentation": [[0, 0, 1, 0, 1, 1]], "iscrowd": 0},
+            ],
+        }
+        autosave_path = Path(output_dir) / f"{file_label}_autosave.json"
+        with open(autosave_path, "w") as f:
+            json.dump(corrupt, f)
+
+        resp = client.get("/api/autosave/0")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["has_autosave"] is True
+        # Only the id=0 entry survives the sanitizer; the two -1s are gone.
+        assert data["n_annotations"] == 1
+        assert data["annotations"][0]["category_id"] == 0
+
 
 # ---------------------------------------------------------------------------
 # Stats
