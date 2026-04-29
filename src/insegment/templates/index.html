@@ -423,6 +423,26 @@ async function loadImage(index) {
         }
         document.getElementById('loading').style.display = 'none';
     };
+    // Image load failure (file deleted/moved between scan and now). The
+    // server already returns 404 with a descriptive JSON body via
+    // /api/image/<index> -- fetch it explicitly so we can show the message.
+    img.onerror = async () => {
+        document.getElementById('loading').style.display = 'none';
+        let msg = 'Image not found (file may have been deleted or moved).';
+        try {
+            const resp = await fetch(`/api/image/${index}`);
+            if (!resp.ok) {
+                const data = await resp.json().catch(() => ({}));
+                if (data.error) msg = data.error;
+            }
+        } catch (_) { /* fall through with generic msg */ }
+        setStatus(msg);
+        // Clear the canvas so the user sees the previous image isn't lying.
+        state.bgImage = null;
+        state.annotations = [];
+        if (typeof drawBg === 'function') drawBg();
+        if (typeof drawOverlay === 'function') drawOverlay();
+    };
     img.src = `/api/image/${index}?t=${Date.now()}`;
 }
 

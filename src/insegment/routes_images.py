@@ -35,9 +35,20 @@ def api_images():
 @bp.route("/api/image/<int:index>")
 def api_image(index):
     """Serve an image as PNG by index."""
+    if index < 0 or index >= len(STATE.get("images", [])):
+        return jsonify({"error": "Invalid image index"}), 404
     frame = load_image(index)
     if frame is None:
-        return jsonify({"error": "Image not found"}), 404
+        # File was on disk at scan time but is now missing or unreadable.
+        # Surface the path so the user can act (e.g. "I deleted that file").
+        path = STATE["images"][index]["path"]
+        return jsonify({
+            "error": (
+                f"Image file no longer available: {path}. "
+                "It may have been moved, renamed, or deleted since the "
+                "folder was scanned. Re-open the folder to refresh."
+            )
+        }), 404
 
     # Convert to 8-bit for display (already uint8 from load_image)
     if frame.ndim == 2:
@@ -65,7 +76,14 @@ def api_load(index):
         return jsonify(STATE["annotations"][index])
     frame = load_image(index)
     if frame is None:
-        return jsonify({"error": "Could not load image"}), 404
+        path = STATE["images"][index]["path"]
+        return jsonify({
+            "error": (
+                f"Image file no longer available: {path}. "
+                "It may have been moved, renamed, or deleted since the "
+                "folder was scanned. Re-open the folder to refresh."
+            )
+        }), 404
     h, w = frame.shape[:2]
     saved = _load_saved_annotations(index)
     result = {

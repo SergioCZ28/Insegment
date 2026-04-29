@@ -10,6 +10,7 @@ from insegment.utils import (
     _build_coco_dict,
     _get_file_label,
     _get_file_name,
+    build_category_map,
     require_fields,
 )
 
@@ -120,12 +121,16 @@ def api_get_autosave(index):
     with open(autosave_path) as f:
         coco = json.load(f)
 
-    # Convert COCO back to internal format (1-indexed -> 0-indexed)
+    # Map COCO category IDs to internal class IDs by name. Handles both the
+    # 0-indexed export Insegment writes today and any 1-indexed legacy file.
+    cat_map = build_category_map(coco.get("categories", []))
     annotations = []
     for ann in coco.get("annotations", []):
+        coco_cat_id = ann["category_id"]
+        internal_id = cat_map.get(coco_cat_id, coco_cat_id)
         annotations.append({
             "id": ann["id"],
-            "category_id": ann["category_id"] - 1,
+            "category_id": internal_id,
             "bbox": ann["bbox"],
             "area": ann["area"],
             "segmentation": ann["segmentation"],

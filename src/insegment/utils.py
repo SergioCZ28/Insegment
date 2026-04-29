@@ -118,12 +118,26 @@ def load_image(index):
 
     Opens the image with PIL (handles PNG, JPEG, TIFF, BMP, WebP, etc.)
     and returns a numpy array (uint8, grayscale or RGB).
+
+    Returns None if the index is out of range, the file no longer exists
+    on disk (e.g. user deleted/moved it during a session), or PIL fails to
+    decode it. Callers should treat None as "image unavailable" and surface
+    a friendly error to the user instead of letting the route 500.
     """
     if index < 0 or index >= len(STATE["images"]):
         return None
     path = STATE["images"][index]["path"]
-    img = Image.open(path)
-    frame = np.array(img)
+    if not Path(path).exists():
+        logger.warning("Image file no longer exists at %s", path)
+        return None
+    try:
+        img = Image.open(path)
+        frame = np.array(img)
+    except (OSError, ValueError) as e:
+        # OSError: file unreadable / truncated / permission denied
+        # ValueError: PIL couldn't decode the format
+        logger.warning("Failed to read image at %s: %s", path, e)
+        return None
     # Normalize to uint8 if needed (e.g. 16-bit TIFF)
     if frame.dtype != np.uint8:
         frame_f = frame.astype(np.float32)

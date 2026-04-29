@@ -124,6 +124,24 @@ class TestBootstrap:
         resp = client.get("/api/image/99")
         assert resp.status_code in (400, 404)
 
+    def test_image_missing_on_disk_returns_404_not_500(self, client, image_dir):
+        """Regression: deleting the PNG between scan and reload must not
+        crash the route. Previously `Image.open(missing_path)` raised
+        FileNotFoundError, which propagated as a 500. Now load_image()
+        checks Path.exists() first and the route returns a 404 with a
+        descriptive error message naming the missing path.
+        """
+        # Delete the PNG that was scanned at fixture time.
+        missing = image_dir / "img_000.png"
+        missing.unlink()
+        resp = client.get("/api/image/0")
+        assert resp.status_code == 404
+        body = resp.get_json()
+        assert "no longer available" in body["error"]
+        # /api/load should also degrade gracefully, not 500.
+        resp2 = client.get("/api/load/0")
+        assert resp2.status_code == 404
+
     def test_detections_without_model_returns_empty(self, client):
         # With no model, /api/detections should still succeed and return
         # an empty annotation container (annotation-only mode).
@@ -309,6 +327,66 @@ class TestExportAndAutosave:
         assert resp.status_code == 200
         stats = client.get("/api/stats/0").get_json()
         assert stats["total"] == 1
+
+    # -- Regression tests for the off-by-one loader bug ---------------------
+    # Symptom: saved annotations rendered gray on reload because the loader
+    # subtracted 1 from `category_id`, while `export_coco` writes 0-indexed
+    # category_ids by design (matching BacDETR / unified_annotations).
+    # Single-cell (id 0) became id -1 -> no class match -> gray.
+    # Both round-trips below should preserve the id exactly.
+
+    def test_save_reload_preserves_category_id(self, client, output_dir):
+        """Save -> drop cached annotations -> reload via _load_saved_annotations.
+
+        Adds one of each class, exports to COCO, clears the in-memory
+        annotations cache (forcing the next /api/detections to read from
+        disk), and asserts the reloaded category_ids match what was saved.
+        """
+        from insegment import app as app_module
+
+        _bootstrap(client)
+        for class_id in (0, 1, 2):
+            r = client.post(
+                "/api/add",
+                json={"index": 0, "x": 10.0, "y": 15.0, "class_id": class_id},
+            )
+            assert r.status_code == 200
+
+        # Save -> writes <stem>_annotations.json into output_dir.
+        resp = client.get("/api/export/0?format=coco")
+        assert resp.status_code == 200
+
+        # Drop the in-memory cache so the next /api/detections reloads from disk.
+        app_module.STATE["annotations"].pop(0, None)
+
+        reloaded = client.get("/api/detections/0").get_json()
+        ids = sorted(a["category_id"] for a in reloaded["annotations"])
+        assert ids == [0, 1, 2], (
+            f"Expected category_ids preserved as [0, 1, 2], got {ids}. "
+            "If you see [-1, 0, 1] the off-by-one loader bug has come back."
+        )
+
+    def test_autosave_roundtrip_preserves_category_id(self, client):
+        """Autosave -> /api/autosave/<idx> reload preserves category_id.
+
+        Same regression bug also lived in routes_export.api_get_autosave.
+        """
+        _bootstrap(client)
+        for class_id in (0, 1, 2):
+            client.post(
+                "/api/add",
+                json={"index": 0, "x": 10.0, "y": 15.0, "class_id": class_id},
+            )
+
+        resp = client.post("/api/autosave", json={"index": 0})
+        assert resp.status_code == 200
+
+        check = client.get("/api/autosave/0").get_json()
+        assert check["has_autosave"] is True
+        ids = sorted(a["category_id"] for a in check["annotations"])
+        assert ids == [0, 1, 2], (
+            f"Expected category_ids preserved as [0, 1, 2], got {ids}."
+        )
 
 
 # ---------------------------------------------------------------------------
