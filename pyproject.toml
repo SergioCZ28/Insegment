@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "insegment"
-version = "0.1.0"
+version = "0.2.0"
 description = "Interactive instance segmentation annotation tool for microscopy and beyond"
 readme = "README.md"
 license = {text = "MIT"}

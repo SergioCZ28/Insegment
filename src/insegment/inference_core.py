@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 
 from insegment.state import STATE
-from insegment.utils import load_image, mask_to_polygon
+from insegment.utils import build_category_map, load_image, mask_to_polygon
 
 logger = logging.getLogger(__name__)
 
@@ -37,11 +37,20 @@ def _load_saved_annotations(index):
     except (OSError, json.JSONDecodeError) as e:
         logger.warning("Failed to read saved annotations %s: %s", saved_path, e)
         return None
+    # Map COCO category IDs to internal class IDs *by name* (auto-creating
+    # any missing classes). This handles 0-indexed exports (Insegment's own
+    # `export_coco`), 1-indexed exports (e.g. Roboflow), and arbitrary IDs
+    # equally well -- the lookup is by category name, not by raw id.
+    # If the file has no `categories` array (very old / minimal COCOs), the
+    # cat_map is empty and we fall through to identity below.
+    cat_map = build_category_map(coco.get("categories", []))
     annotations = []
     for ann in coco.get("annotations", []):
+        coco_cat_id = ann["category_id"]
+        internal_id = cat_map.get(coco_cat_id, coco_cat_id)
         annotations.append({
             "id": ann["id"],
-            "category_id": ann["category_id"] - 1,  # COCO is 1-indexed
+            "category_id": internal_id,
             "bbox": ann["bbox"],
             "area": ann["area"],
             "segmentation": ann["segmentation"],

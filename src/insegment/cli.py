@@ -64,6 +64,7 @@ def load_model_class(model_string):
 def cmd_serve(args):
     """Start the annotation server."""
     from insegment.app import app, configure_app
+    from insegment.profiles import apply_profile
 
     # Configure logging
     level = logging.DEBUG if args.verbose else logging.INFO
@@ -71,6 +72,26 @@ def cmd_serve(args):
         level=level,
         format="%(levelname)s: %(message)s",
     )
+
+    # Resolve profile values into any unset args BEFORE we apply hard
+    # defaults below. CLI flags always win over profile values.
+    # If --profile wasn't passed, look for a profile literally named
+    # "default" and apply it silently if it exists.
+    if args.profile:
+        apply_profile(args, args.profile)
+    else:
+        from insegment.profiles import load_profiles
+        if "default" in load_profiles():
+            apply_profile(args, "default")
+
+    # Apply hard fallbacks for args that argparse left as None so that
+    # profiles get a chance to populate them first.
+    if args.output_dir is None:
+        args.output_dir = "./annotations_output"
+    if args.port is None:
+        args.port = 5000
+    if args.cell_radius is None:
+        args.cell_radius = 4
 
     # Handle deprecated --tiff-dir
     image_dir = args.image_dir
@@ -161,20 +182,32 @@ def main():
     serve_parser.add_argument(
         "--output-dir",
         type=str,
-        default="./annotations_output",
+        default=None,
         help="Output directory for exported annotations (default: ./annotations_output)",
     )
     serve_parser.add_argument(
         "--port",
         type=int,
-        default=5000,
+        default=None,
         help="Port to run the server on (default: 5000)",
     )
     serve_parser.add_argument(
         "--cell-radius",
         type=int,
-        default=4,
+        default=None,
         help="Radius in pixels for manually added circle annotations (default: 4)",
+    )
+    serve_parser.add_argument(
+        "--profile",
+        type=str,
+        default=None,
+        help=(
+            "Named profile from ~/.insegment/profiles.json to fill in "
+            "defaults (e.g. model, checkpoint, image-dir). CLI flags "
+            "override profile values. If a profile literally named "
+            "'default' exists, it is applied automatically when --profile "
+            "is omitted."
+        ),
     )
     serve_parser.add_argument(
         "--min-area",
@@ -201,6 +234,25 @@ def main():
     )
     serve_parser.set_defaults(func=cmd_serve)
 
+    # --- profile subcommand: list/show profiles ----------------------------
+    profile_parser = subparsers.add_parser(
+        "profile",
+        help="Inspect Insegment CLI profiles",
+        description=(
+            "List or print profiles defined in ~/.insegment/profiles.json. "
+            "Profiles are bundles of `serve` defaults (model, image-dir, "
+            "etc.) recalled via `insegment serve --profile <name>`. The "
+            "file is plain JSON -- create or edit it with any text editor."
+        ),
+    )
+    profile_subs = profile_parser.add_subparsers(
+        dest="profile_action", help="profile actions",
+    )
+    profile_subs.add_parser("list", help="List all profile names")
+    show_p = profile_subs.add_parser("show", help="Print one profile's contents")
+    show_p.add_argument("name", help="Profile name to show")
+    profile_parser.set_defaults(func=cmd_profile)
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -208,6 +260,37 @@ def main():
         sys.exit(0)
 
     args.func(args)
+
+
+def cmd_profile(args):
+    """Implementation of the `insegment profile ...` subcommand."""
+    from insegment.profiles import load_profiles, profiles_path
+
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+
+    profiles = load_profiles()
+    path = profiles_path()
+
+    action = getattr(args, "profile_action", None)
+    if action is None or action == "list":
+        if not profiles:
+            print(f"No profiles found. Edit {path} to create one.")
+            return
+        print(f"Profiles in {path}:")
+        for name in sorted(profiles.keys()):
+            data = profiles[name]
+            keys = ", ".join(sorted(data.keys())) if isinstance(data, dict) else "(invalid)"
+            print(f"  {name}  [{keys}]")
+        return
+
+    if action == "show":
+        if args.name not in profiles:
+            available = ", ".join(sorted(profiles.keys())) or "(none)"
+            print(f"Profile '{args.name}' not found. Available: {available}")
+            sys.exit(1)
+        import json as _json
+        print(_json.dumps(profiles[args.name], indent=2, sort_keys=True))
+        return
 
 
 if __name__ == "__main__":

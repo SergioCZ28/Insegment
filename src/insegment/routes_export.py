@@ -1,6 +1,7 @@
 """Blueprint: export, autosave, restore, stats."""
 
 import json
+import logging
 from pathlib import Path
 
 from flask import Blueprint, jsonify, request
@@ -10,10 +11,49 @@ from insegment.utils import (
     _build_coco_dict,
     _get_file_label,
     _get_file_name,
+    build_category_map,
     require_fields,
 )
 
 bp = Blueprint("export", __name__)
+logger = logging.getLogger(__name__)
+
+
+def _drop_unknown_classes(annotations, source_label):
+    """Return only annotations whose `category_id` is a current internal class.
+
+    Defense in depth against stale data: a previous Insegment session
+    could have written an autosave (server-side OR localStorage) whose
+    `category_id` is no longer valid -- typically the off-by-one bug
+    that produced `-1`, but also any class the user has since deleted.
+    Loading those silently makes them render as gray polygons (the
+    `#888888` fallback in index.html) and look like "ghost"
+    annotations the user didn't make.
+
+    Drop them at the boundary, log how many got dropped, and the UI
+    only sees clean data. Caller passes `source_label` so the log
+    line is actionable ("autosave file" vs "/api/restore body").
+    """
+    valid_ids = set(STATE.get("class_names", {}).keys())
+    if not valid_ids:
+        return list(annotations)
+    cleaned = []
+    dropped = []
+    for ann in annotations:
+        cid = ann.get("category_id")
+        if cid in valid_ids:
+            cleaned.append(ann)
+        else:
+            dropped.append(cid)
+    if dropped:
+        from collections import Counter
+        logger.warning(
+            "Dropped %d %s annotations with invalid category_ids (%s); "
+            "valid ids are %s.",
+            len(dropped), source_label,
+            dict(Counter(dropped)), sorted(valid_ids),
+        )
+    return cleaned
 
 
 @bp.route("/api/export/<int:index>")
@@ -120,12 +160,16 @@ def api_get_autosave(index):
     with open(autosave_path) as f:
         coco = json.load(f)
 
-    # Convert COCO back to internal format (1-indexed -> 0-indexed)
+    # Map COCO category IDs to internal class IDs by name. Handles both the
+    # 0-indexed export Insegment writes today and any 1-indexed legacy file.
+    cat_map = build_category_map(coco.get("categories", []))
     annotations = []
     for ann in coco.get("annotations", []):
+        coco_cat_id = ann["category_id"]
+        internal_id = cat_map.get(coco_cat_id, coco_cat_id)
         annotations.append({
             "id": ann["id"],
-            "category_id": ann["category_id"] - 1,
+            "category_id": internal_id,
             "bbox": ann["bbox"],
             "area": ann["area"],
             "segmentation": ann["segmentation"],
@@ -133,6 +177,9 @@ def api_get_autosave(index):
             "source": "manual",
         })
 
+    annotations = _drop_unknown_classes(
+        annotations, f"autosave file {autosave_path.name}"
+    )
     return jsonify({
         "has_autosave": True,
         "annotations": annotations,
@@ -152,6 +199,11 @@ def api_restore():
 
     if index not in STATE["annotations"]:
         return jsonify({"error": "Image not loaded"}), 400
+
+    # Strip annotations whose class no longer exists. Protects against
+    # browser-localStorage autosaves saved before a class rename / delete
+    # / off-by-one fix landed.
+    annotations = _drop_unknown_classes(annotations, "/api/restore payload")
 
     ann_data = STATE["annotations"][index]
     ann_data["annotations"] = annotations

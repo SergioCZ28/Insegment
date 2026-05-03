@@ -40,7 +40,7 @@ class BacDETRSegmenter(BaseSegmenter):
 
     def __init__(
         self,
-        checkpoint: Optional[str] = None,
+        checkpoint_path: Optional[str] = None,
         score_threshold: float = 0.30,
         nms_iou: float = 0.30,
         patch_size: int = 432,
@@ -50,7 +50,7 @@ class BacDETRSegmenter(BaseSegmenter):
     ) -> None:
         from HiTMicTools.model_components.scsegmenter import ScSegmenter
 
-        ckpt = checkpoint or DEFAULT_CHECKPOINT
+        ckpt = checkpoint_path or DEFAULT_CHECKPOINT
         if not Path(ckpt).exists():
             raise FileNotFoundError(f"BacDETR checkpoint not found: {ckpt}")
 

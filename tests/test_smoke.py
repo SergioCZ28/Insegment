@@ -124,6 +124,24 @@ class TestBootstrap:
         resp = client.get("/api/image/99")
         assert resp.status_code in (400, 404)
 
+    def test_image_missing_on_disk_returns_404_not_500(self, client, image_dir):
+        """Regression: deleting the PNG between scan and reload must not
+        crash the route. Previously `Image.open(missing_path)` raised
+        FileNotFoundError, which propagated as a 500. Now load_image()
+        checks Path.exists() first and the route returns a 404 with a
+        descriptive error message naming the missing path.
+        """
+        # Delete the PNG that was scanned at fixture time.
+        missing = image_dir / "img_000.png"
+        missing.unlink()
+        resp = client.get("/api/image/0")
+        assert resp.status_code == 404
+        body = resp.get_json()
+        assert "no longer available" in body["error"]
+        # /api/load should also degrade gracefully, not 500.
+        resp2 = client.get("/api/load/0")
+        assert resp2.status_code == 404
+
     def test_detections_without_model_returns_empty(self, client):
         # With no model, /api/detections should still succeed and return
         # an empty annotation container (annotation-only mode).
@@ -309,6 +327,144 @@ class TestExportAndAutosave:
         assert resp.status_code == 200
         stats = client.get("/api/stats/0").get_json()
         assert stats["total"] == 1
+
+    # -- Regression tests for the off-by-one loader bug ---------------------
+    # Symptom: saved annotations rendered gray on reload because the loader
+    # subtracted 1 from `category_id`, while `export_coco` writes 0-indexed
+    # category_ids by design (matching BacDETR / unified_annotations).
+    # Single-cell (id 0) became id -1 -> no class match -> gray.
+    # Both round-trips below should preserve the id exactly.
+
+    def test_save_reload_preserves_category_id(self, client, output_dir):
+        """Save -> drop cached annotations -> reload via _load_saved_annotations.
+
+        Adds one of each class, exports to COCO, clears the in-memory
+        annotations cache (forcing the next /api/detections to read from
+        disk), and asserts the reloaded category_ids match what was saved.
+        """
+        from insegment import app as app_module
+
+        _bootstrap(client)
+        for class_id in (0, 1, 2):
+            r = client.post(
+                "/api/add",
+                json={"index": 0, "x": 10.0, "y": 15.0, "class_id": class_id},
+            )
+            assert r.status_code == 200
+
+        # Save -> writes <stem>_annotations.json into output_dir.
+        resp = client.get("/api/export/0?format=coco")
+        assert resp.status_code == 200
+
+        # Drop the in-memory cache so the next /api/detections reloads from disk.
+        app_module.STATE["annotations"].pop(0, None)
+
+        reloaded = client.get("/api/detections/0").get_json()
+        ids = sorted(a["category_id"] for a in reloaded["annotations"])
+        assert ids == [0, 1, 2], (
+            f"Expected category_ids preserved as [0, 1, 2], got {ids}. "
+            "If you see [-1, 0, 1] the off-by-one loader bug has come back."
+        )
+
+    def test_autosave_roundtrip_preserves_category_id(self, client):
+        """Autosave -> /api/autosave/<idx> reload preserves category_id.
+
+        Same regression bug also lived in routes_export.api_get_autosave.
+        """
+        _bootstrap(client)
+        for class_id in (0, 1, 2):
+            client.post(
+                "/api/add",
+                json={"index": 0, "x": 10.0, "y": 15.0, "class_id": class_id},
+            )
+
+        resp = client.post("/api/autosave", json={"index": 0})
+        assert resp.status_code == 200
+
+        check = client.get("/api/autosave/0").get_json()
+        assert check["has_autosave"] is True
+        ids = sorted(a["category_id"] for a in check["annotations"])
+        assert ids == [0, 1, 2], (
+            f"Expected category_ids preserved as [0, 1, 2], got {ids}."
+        )
+
+    # -- Defense-in-depth: drop annotations with stale category_ids --------
+    # Stale autosaves (server-side or browser localStorage) written by an
+    # older Insegment may contain category_ids that no longer exist (e.g.
+    # the off-by-one bug produced -1, or a class was deleted). Loading
+    # them silently makes the polygons render gray. Both the autosave-load
+    # path and /api/restore must filter them out so the UI only ever
+    # receives annotations whose class is currently defined.
+
+    def test_restore_drops_unknown_category_ids(self, client):
+        """POST /api/restore with -1 / 99 entries: dropped, only valid kept."""
+        _bootstrap(client)
+        payload = {
+            "index": 0,
+            "annotations": [
+                {"id": 0, "category_id": 0, "bbox": [0, 0, 1, 1],
+                 "area": 1.0, "segmentation": [[0, 0, 1, 0, 1, 1]]},
+                {"id": 1, "category_id": -1, "bbox": [0, 0, 1, 1],
+                 "area": 1.0, "segmentation": [[0, 0, 1, 0, 1, 1]]},
+                {"id": 2, "category_id": 99, "bbox": [0, 0, 1, 1],
+                 "area": 1.0, "segmentation": [[0, 0, 1, 0, 1, 1]]},
+                {"id": 3, "category_id": 1, "bbox": [0, 0, 1, 1],
+                 "area": 1.0, "segmentation": [[0, 0, 1, 0, 1, 1]]},
+            ],
+        }
+        resp = client.post("/api/restore", json=payload)
+        assert resp.status_code == 200
+        # /api/restore reports cleaned count, not posted count.
+        assert resp.get_json()["n_annotations"] == 2
+        stats = client.get("/api/stats/0").get_json()
+        assert stats["total"] == 2
+        assert stats["single-cell"] == 1
+        assert stats["clump"] == 1
+
+    def test_get_autosave_drops_unknown_category_ids(self, client, output_dir):
+        """A stale autosave file with -1 entries: served WITHOUT the -1s.
+
+        Reproduces the exact corruption Sergio's
+        Cip_..._p02_t00_autosave.json had: 558 entries with id -1
+        plus 1 with id 0. After the fix, GET /api/autosave/<idx>
+        returns only the valid entry.
+        """
+        _bootstrap(client)
+        # Hand-craft a corrupt autosave file mimicking pre-fix data.
+        file_label = "img_000"
+        corrupt = {
+            "images": [{"id": 1, "file_name": "img_000.png",
+                        "width": 40, "height": 32}],
+            "categories": [
+                {"id": 0, "name": "single-cell"},
+                {"id": 1, "name": "clump"},
+                {"id": 2, "name": "debris"},
+            ],
+            "annotations": [
+                {"id": 0, "image_id": 1, "category_id": 0,
+                 "bbox": [0, 0, 1, 1], "area": 1.0,
+                 "segmentation": [[0, 0, 1, 0, 1, 1]], "iscrowd": 0},
+                # Two -1 entries that would render as gray. The bug
+                # produced these on every reload pre-fix.
+                {"id": 1, "image_id": 1, "category_id": -1,
+                 "bbox": [0, 0, 1, 1], "area": 1.0,
+                 "segmentation": [[0, 0, 1, 0, 1, 1]], "iscrowd": 0},
+                {"id": 2, "image_id": 1, "category_id": -1,
+                 "bbox": [0, 0, 1, 1], "area": 1.0,
+                 "segmentation": [[0, 0, 1, 0, 1, 1]], "iscrowd": 0},
+            ],
+        }
+        autosave_path = Path(output_dir) / f"{file_label}_autosave.json"
+        with open(autosave_path, "w") as f:
+            json.dump(corrupt, f)
+
+        resp = client.get("/api/autosave/0")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["has_autosave"] is True
+        # Only the id=0 entry survives the sanitizer; the two -1s are gone.
+        assert data["n_annotations"] == 1
+        assert data["annotations"][0]["category_id"] == 0
 
 
 # ---------------------------------------------------------------------------
